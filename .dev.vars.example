@@ -1,0 +1,4 @@
+# Generate with: npm run hash-password -- "your-password"
+PASSWORD_HASH=
+# Optional salt override (defaults baked into hash-password script format)
+# PASSWORD_SALT=
