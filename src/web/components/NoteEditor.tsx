@@ -36,6 +36,19 @@ function isDoc(c: unknown): c is TipTapJSON {
   return !!c && typeof c === "object" && (c as TipTapJSON).type === "doc";
 }
 
+/** ProseMirror rejects empty text nodes (the shared template contains one); drop them. */
+function cleanNode(node: unknown): unknown {
+  if (!node || typeof node !== "object") return node;
+  const n = node as { type?: string; text?: string; content?: unknown[] };
+  if (!Array.isArray(n.content)) return n;
+  return {
+    ...n,
+    content: n.content
+      .filter((c) => !(c && (c as { type?: string; text?: string }).type === "text" && !(c as { text?: string }).text))
+      .map(cleanNode),
+  };
+}
+
 export function NoteEditor({ note, allTags, onTitle, onContent, onPin, onDelete, onTags }: Props) {
   const [title, setTitle] = useState(note.title);
   const [confirming, setConfirming] = useState(false);
@@ -53,7 +66,7 @@ export function NoteEditor({ note, allTags, onTitle, onContent, onPin, onDelete,
         TaskItem.configure({ nested: true }),
         Placeholder.configure({ placeholder: "Start writing. Tick things off as you learn them." }),
       ],
-      content: isDoc(note.content) ? note.content : "",
+      content: isDoc(note.content) ? (cleanNode(note.content) as TipTapJSON) : "",
       editorProps: { attributes: { class: "prose", spellcheck: "true" } },
       onUpdate: ({ editor }) => onContent(noteId, editor.getJSON() as TipTapJSON),
     },

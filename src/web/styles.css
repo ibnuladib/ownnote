@@ -550,6 +550,19 @@ kbd {
   box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.7);
   animation: rise 0.18s var(--ease) both;
 }
+/* the "New" menu spans the list column so the pane's overflow never clips it */
+.list-head {
+  position: relative;
+}
+.new-wrap {
+  position: static;
+}
+.new-wrap .menu {
+  top: calc(100% - 2px);
+  left: 14px;
+  right: 14px;
+  width: auto;
+}
 .menu-right {
   left: auto;
   right: 0;
@@ -810,7 +823,8 @@ kbd {
   outline: none;
   font-family: var(--f-ui);
   font-weight: 800;
-  font-size: clamp(28px, 3.4vw, 42px);
+  font-size: clamp(24px, 2.8vw, 38px);
+  text-overflow: ellipsis;
   letter-spacing: -0.035em;
   line-height: 1.1;
   font-variation-settings: "opsz" 72;
@@ -960,6 +974,9 @@ kbd {
 }
 .prose > * + * {
   margin-top: 0.7em;
+}
+.prose > :first-child {
+  margin-top: 0 !important;
 }
 .prose p {
   margin: 0;
