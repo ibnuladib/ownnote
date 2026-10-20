@@ -424,7 +424,8 @@ export function muxSabrTracks(
           header[0] = type;
           new DataView(header.buffer).setUint32(1, data.byteLength);
           controller.enqueue(header);
-          if (data.byteLength) controller.enqueue(data);
+          // Copy — googlevideo may reuse chunk buffers before the consumer reads.
+          if (data.byteLength) controller.enqueue(data.slice());
         });
         return gate;
       };

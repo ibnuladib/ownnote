@@ -4,6 +4,9 @@ const APPEND_CHUNK = 256 * 1024;
 const TYPE_END = 0;
 const TYPE_VIDEO = 1;
 const TYPE_AUDIO = 2;
+/** Resolve whenReady once we have this much continuous media from t=0. */
+const READY_BUFFER_S = 0.35;
+const READY_TIMEOUT_MS = 45_000;
 
 function waitUpdateEnd(sb: SourceBuffer): Promise<void> {
   if (!sb.updating) return Promise.resolve();
@@ -26,9 +29,18 @@ async function appendBytes(
     const slice = bytes.subarray(offset, Math.min(offset + APPEND_CHUNK, bytes.byteLength));
     const copy = new Uint8Array(slice.byteLength);
     copy.set(slice);
+    // Wait until idle, append, then wait for THIS append — browsers can report
+    // updating===false in a gap before the previous append is fully booked.
     await waitUpdateEnd(sb);
     if (signal.aborted) return;
-    sb.appendBuffer(copy);
+    try {
+      sb.appendBuffer(copy);
+    } catch {
+      await waitUpdateEnd(sb);
+      if (signal.aborted) return;
+      sb.appendBuffer(copy);
+    }
+    await waitUpdateEnd(sb);
   }
 }
 
@@ -36,6 +48,50 @@ function sourceType(mime: string): string {
   if (mime.includes("codecs=")) return mime;
   if (mime.startsWith("video/")) return 'video/mp4; codecs="avc1.4d401f"';
   return 'audio/mp4; codecs="mp4a.40.2"';
+}
+
+/** Earliest contiguous buffered end from t≈0, or 0 if nothing useful is buffered. */
+export function sabrBufferedEnd(video: HTMLVideoElement): number {
+  try {
+    if (!video.buffered.length) return 0;
+    // Prefer a range that covers (or starts near) the beginning.
+    for (let i = 0; i < video.buffered.length; i++) {
+      const start = video.buffered.start(i);
+      const end = video.buffered.end(i);
+      if (start <= 0.5) return end;
+    }
+    return video.buffered.end(0);
+  } catch {
+    return 0;
+  }
+}
+
+/** Clamp a seek target into currently buffered media (SABR has no mid-stream jump yet). */
+export function clampSabrSeek(video: HTMLVideoElement, want: number): number {
+  try {
+    if (!video.buffered.length) return 0;
+    for (let i = 0; i < video.buffered.length; i++) {
+      const start = video.buffered.start(i);
+      const end = video.buffered.end(i);
+      if (want >= start && want <= end - 0.15) return want;
+    }
+    // Nearest buffered end, slightly inside the range.
+    let best = video.buffered.start(0);
+    let bestDist = Infinity;
+    for (let i = 0; i < video.buffered.length; i++) {
+      const start = video.buffered.start(i);
+      const end = video.buffered.end(i);
+      const clamped = Math.min(Math.max(want, start), Math.max(start, end - 0.25));
+      const dist = Math.abs(clamped - want);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = clamped;
+      }
+    }
+    return best;
+  } catch {
+    return 0;
+  }
 }
 
 class ByteReader {
@@ -99,6 +155,41 @@ export type SabrMseHandle = {
   whenReady: Promise<void>;
 };
 
+function waitForBuffer(video: HTMLVideoElement, signal: AbortSignal): Promise<void> {
+  if (sabrBufferedEnd(video) >= READY_BUFFER_S) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poll);
+      video.removeEventListener("progress", onProgress);
+      video.removeEventListener("error", onError);
+      signal.removeEventListener("abort", onAbort);
+      fn();
+    };
+    const onProgress = () => {
+      if (sabrBufferedEnd(video) >= READY_BUFFER_S) finish(() => resolve());
+    };
+    const onError = () =>
+      finish(() => reject(new Error(video.error?.message || "SABR media error")));
+    const onAbort = () => finish(() => reject(new Error("SABR aborted")));
+    const timer = setTimeout(
+      () =>
+        finish(() =>
+          reject(new Error("SABR stream stalled before any playable media buffered")),
+        ),
+      READY_TIMEOUT_MS,
+    );
+    // Poll too — MSE progress events are unreliable across browsers.
+    const poll = setInterval(onProgress, 200);
+    video.addEventListener("progress", onProgress);
+    video.addEventListener("error", onError);
+    signal.addEventListener("abort", onAbort);
+  });
+}
+
 export function attachSabrMse(
   video: HTMLVideoElement,
   opts: {
@@ -113,6 +204,17 @@ export function attachSabrMse(
   let stopped = false;
 
   const whenReady = new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const ok = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const fail = (e: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(e instanceof Error ? e : new Error(String(e)));
+    };
     const onOpen = async () => {
       ms.removeEventListener("sourceopen", onOpen);
       try {
@@ -124,6 +226,11 @@ export function attachSabrMse(
         const aSb = ms.addSourceBuffer(aType);
         vSb.mode = "segments";
         aSb.mode = "segments";
+
+        const sbError = (which: string) => () => fail(new Error(`SABR ${which} SourceBuffer error`));
+        vSb.addEventListener("error", sbError("video"));
+        aSb.addEventListener("error", sbError("audio"));
+
         const pump = demuxMux(opts.muxUrl, vSb, aSb, ac.signal).then(async () => {
           if (stopped || ac.signal.aborted) return;
           try {
@@ -132,12 +239,19 @@ export function attachSabrMse(
             /* ignore */
           }
         });
-        pump.catch(() => {});
-        await new Promise((r) => setTimeout(r, 500));
-        resolve();
+        pump.catch((e) => {
+          if (!stopped && !ac.signal.aborted) fail(e);
+        });
+
+        await waitForBuffer(video, ac.signal);
+        if (stopped || ac.signal.aborted) {
+          fail(new Error("SABR aborted"));
+          return;
+        }
+        ok();
         await pump;
       } catch (e) {
-        reject(e);
+        fail(e);
       }
     };
     ms.addEventListener("sourceopen", onOpen);

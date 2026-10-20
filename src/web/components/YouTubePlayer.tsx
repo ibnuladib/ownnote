@@ -20,7 +20,12 @@ import {
 } from "lucide-react";
 import { youtubeWatchUrl } from "@shared/youtube";
 import { api } from "../api";
-import { attachSabrMse, type SabrMseHandle } from "../lib/sabrMse";
+import {
+  attachSabrMse,
+  clampSabrSeek,
+  sabrBufferedEnd,
+  type SabrMseHandle,
+} from "../lib/sabrMse";
 import { formatClock } from "../lib/time";
 
 type QualityOption = {
@@ -298,17 +303,36 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
         handle.stop();
         return;
       }
-      if (session.pos > 0) {
+      // SABR mux always starts at t=0. Seeking past the buffered prefix stalls
+      // forever while the UI still said "Playing" — that was the silent failure.
+      const buffered = sabrBufferedEnd(v);
+      const resumeFrom = session.pos;
+      if (resumeFrom > 1 && resumeFrom > buffered - 0.5) {
+        session.pos = 0;
+        setClock({ pos: 0, dur: session.dur });
+        setBanner(
+          `Playing ${started.label} in-app from the start (can't resume at ${formatClock(resumeFrom)} yet).`,
+        );
+      } else if (resumeFrom > 0 && buffered > resumeFrom) {
         try {
-          v.currentTime = session.pos;
+          v.currentTime = clampSabrSeek(v, resumeFrom);
         } catch {
-          /* may not be seekable yet */
+          /* ignore */
         }
+        setBanner(`Playing ${started.label} in-app (YouTube embed is disabled).`);
+      } else {
+        setBanner(`Playing ${started.label} in-app (YouTube embed is disabled).`);
       }
       setPhase("direct");
-      setBanner(`Playing ${started.label} in-app (YouTube embed is disabled).`);
       wantPlayRef.current = autoplay;
-      if (autoplay) v.play().catch(() => {});
+      if (autoplay) {
+        try {
+          await v.play();
+        } catch {
+          setBanner(`Ready — ${started.label} buffered. Press play to start.`);
+          setPhase("ready");
+        }
+      }
     },
     [isLive, stopSabr],
   );
@@ -360,7 +384,22 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
         if (!preferred) throw new Error("No playable qualities");
         setQualityId(preferred.id);
         if (preferred.kind === "sabr") {
-          await playSabrQuality(session, preferred.height || 720, autoplay);
+          try {
+            await playSabrQuality(session, preferred.height || 720, autoplay);
+          } catch (sabrErr) {
+            // Fall back to progressive (≈360p) so something still plays.
+            const progressive = qs.find((q) => q.kind === "progressive" && q.src);
+            if (!progressive?.src) throw sabrErr;
+            stopSabr();
+            setQualityId(progressive.id);
+            setDirectSrc(progressive.src);
+            setPhase("direct");
+            console.warn("SABR playback failed, falling back to progressive", sabrErr);
+            setBanner(
+              `HD stream unavailable — playing ${progressive.label} instead.`,
+            );
+            wantPlayRef.current = autoplay;
+          }
         } else if (preferred.src) {
           setDirectSrc(preferred.src);
           setPhase("direct");
@@ -680,7 +719,9 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
       const v = videoRef.current;
       if (!v) return;
       const dur = Number(v.duration) || session.dur;
-      const next = Math.max(0, dur ? Math.min((v.currentTime || 0) + delta, Math.max(0, dur - 0.25)) : (v.currentTime || 0) + delta);
+      let next = Math.max(0, dur ? Math.min((v.currentTime || 0) + delta, Math.max(0, dur - 0.25)) : (v.currentTime || 0) + delta);
+      // SABR only has a live buffered prefix — don't seek into empty media.
+      if (sabrRef.current) next = clampSabrSeek(v, next);
       v.currentTime = next;
       session.pos = next;
       session.dur = dur;
@@ -721,7 +762,12 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
     if (!session) return;
     if (modeRef.current === "direct") {
       const v = videoRef.current;
-      if (v) v.currentTime = session.pos;
+      if (v) {
+        const target = sabrRef.current ? clampSabrSeek(v, session.pos) : session.pos;
+        session.pos = target;
+        v.currentTime = target;
+        setClock({ pos: target, dur: session.dur });
+      }
     } else if (phase !== "blocked" && phase !== "api_missing" && phase !== "direct_loading") {
       try {
         playerRef.current?.seekTo(session.pos, true);
