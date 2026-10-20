@@ -1,0 +1,31 @@
+name = "ownnote"
+main = "src/worker/index.ts"
+compatibility_date = "2025-02-24"
+compatibility_flags = ["nodejs_compat"]
+
+# Static SPA (Vite build output). The Worker runs first so that /api/* is always
+# handled by Hono (even for browser navigations such as /api/export downloads);
+# every other request is forwarded to env.ASSETS with SPA fallback to index.html.
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ownnote-db"
+# Replace with the id printed by: npx wrangler d1 create ownnote-db
+# (local dev via `wrangler dev` works with any placeholder value)
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[observability]
+enabled = true
+
+[observability.traces]
+enabled = true
+
+# Secrets (never commit):
+#   PASSWORD_HASH  -> npx wrangler secret put PASSWORD_HASH   (see scripts/hash-password.mjs)
+# Local dev: put PASSWORD_HASH=... in .dev.vars
