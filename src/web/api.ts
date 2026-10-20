@@ -113,16 +113,42 @@ export const api = {
     keepalive = false,
   ) => req<WatchState>("PUT", `/api/watch/${youtubeId}`, body, keepalive),
 
-  /** Progressive MP4 for embed-disabled videos (served via Worker proxy). */
+  /** Progressive MP4 + SABR adaptive catalog for embed-disabled videos. */
   resolveMedia: (youtubeId: string) =>
     req<{
       youtubeId: string;
       title: string;
       duration_seconds: number;
       mimeType: string;
-      src: string;
+      itag: number;
+      label: string;
+      kind: "progressive" | "sabr";
+      height: number;
+      src: string | null;
+      sabr: boolean;
       expires_at: number;
+      qualities: Array<{
+        itag: number;
+        label: string;
+        height: number;
+        kind: "progressive" | "sabr";
+        codecs: string | null;
+        src: string | null;
+      }>;
     }>("GET", `/api/media/youtube/${youtubeId}`),
+
+  startSabr: (youtubeId: string, height: number) =>
+    req<{
+      sessionId: string;
+      label: string;
+      height: number;
+      muxUrl: string;
+      videoMime: string;
+      audioMime: string;
+    }>("POST", `/api/media/youtube/${youtubeId}/sabr/start`, { height }),
+
+  endSabr: (youtubeId: string, sessionId: string) =>
+    req<void>("DELETE", `/api/media/youtube/${youtubeId}/sabr/${sessionId}`),
 };
 
 export const exportUrl = (format: "json" | "markdown") => `/api/export?format=${format}`;

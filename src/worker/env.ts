@@ -5,7 +5,7 @@ export interface Env {
   PASSWORD_HASH?: string;
 }
 
-export type AppEnv = { Bindings: Env };
+export type AppEnv = { Bindings: Env; ExecutionContext: ExecutionContext };
 
 export class HttpError extends Error {
   constructor(

@@ -5,7 +5,15 @@ import { HttpError, type AppEnv } from "../env";
 import { readJson } from "../lib/http";
 import { NOTE_ORDER, loadTags, toNote, toSummary, type NoteRow } from "../lib/notes-db";
 import { toMarkdown } from "../lib/tiptap";
-import { proxyUpstream, resolveAndroidStream } from "../lib/ytAndroid";
+import { endSabrSession, putSabrSession, takeSabrMuxSession } from "../lib/sabrSessions";
+import {
+  muxSabrTracks,
+  peekSabrQualities,
+  proxyUpstream,
+  resolveAndroidCatalog,
+  resolveAndroidStream,
+  startSabrStreams,
+} from "../lib/ytAndroid";
 import { loadVideos } from "./videos";
 
 export const misc = new Hono<AppEnv>();
@@ -172,14 +180,32 @@ misc.get("/media/youtube/:youtubeId", async (c) => {
   const id = c.req.param("youtubeId");
   checkYtId(id);
   try {
-    const stream = await resolveAndroidStream(id);
+    const catalog = await resolveAndroidCatalog(id);
+    const preferred =
+      catalog.qualities.find((q) => q.itag === catalog.preferredItag) ?? catalog.qualities[0]!;
     return c.json({
-      youtubeId: stream.youtubeId,
-      title: stream.title,
-      duration_seconds: stream.durationSeconds,
-      mimeType: stream.mimeType,
-      src: `/api/media/youtube/${id}/stream`,
-      expires_at: stream.expiresAt,
+      youtubeId: catalog.youtubeId,
+      title: catalog.title,
+      duration_seconds: catalog.durationSeconds,
+      mimeType: preferred.mimeType,
+      itag: preferred.itag,
+      label: preferred.label,
+      kind: preferred.kind,
+      height: preferred.height,
+      src:
+        preferred.kind === "progressive"
+          ? `/api/media/youtube/${id}/stream?itag=${preferred.itag}`
+          : null,
+      sabr: preferred.kind === "sabr",
+      expires_at: catalog.expiresAt,
+      qualities: catalog.qualities.map((q) => ({
+        itag: q.itag,
+        label: q.label,
+        height: q.height,
+        kind: q.kind,
+        codecs: q.codecs ?? null,
+        src: q.kind === "progressive" ? `/api/media/youtube/${id}/stream?itag=${q.itag}` : null,
+      })),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Couldn't resolve a stream";
@@ -190,13 +216,80 @@ misc.get("/media/youtube/:youtubeId", async (c) => {
 misc.get("/media/youtube/:youtubeId/stream", async (c) => {
   const id = c.req.param("youtubeId");
   checkYtId(id);
+  const itagRaw = c.req.query("itag");
+  const itag = itagRaw ? Number(itagRaw) : undefined;
   try {
-    const stream = await resolveAndroidStream(id);
+    const stream = await resolveAndroidStream(id, Number.isFinite(itag) ? itag : undefined);
+    if (stream.kind !== "progressive" || !stream.upstreamUrl) {
+      throw new HttpError(400, "That quality needs SABR playback — pick it in the player.");
+    }
     return proxyUpstream(stream.upstreamUrl, c.req.header("Range") ?? null);
   } catch (e) {
+    if (e instanceof HttpError) throw e;
     const msg = e instanceof Error ? e.message : "Couldn't resolve a stream";
     throw new HttpError(422, msg);
   }
+});
+
+/**
+ * Reserve a SABR session. Actual googlevideo I/O starts on GET …/mux so all
+ * streaming stays inside one Workers request (cross-request streams are forbidden).
+ */
+misc.post("/media/youtube/:youtubeId/sabr/start", async (c) => {
+  const id = c.req.param("youtubeId");
+  checkYtId(id);
+  const body = await readJson(c).catch(() => ({} as Record<string, unknown>));
+  const height = Math.min(1080, Math.max(144, Number(body.height) || 720));
+  try {
+    const peeked = await peekSabrQualities(id, height);
+    const sessionId = putSabrSession({
+      youtubeId: id,
+      height,
+      videoMime: peeked.videoMime,
+      audioMime: peeked.audioMime,
+      label: peeked.label,
+    });
+    return c.json({
+      sessionId,
+      label: peeked.label,
+      height,
+      muxUrl: `/api/media/youtube/${id}/sabr/${sessionId}/mux`,
+      videoMime: peeked.videoMime,
+      audioMime: peeked.audioMime,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Couldn't start SABR stream";
+    throw new HttpError(422, msg);
+  }
+});
+
+/** Framed mux: [u8 type][u32be len][bytes] — type 1=video, 2=audio, 0=end. */
+misc.get("/media/youtube/:youtubeId/sabr/:sessionId/mux", async (c) => {
+  const sessionId = c.req.param("sessionId");
+  const meta = takeSabrMuxSession(sessionId);
+  if (!meta) throw new HttpError(404, "SABR session expired — pick the quality again.");
+  try {
+    const started = await startSabrStreams(meta.youtubeId, meta.height);
+    const body = muxSabrTracks(started.videoStream, started.audioStream, started.abort);
+    return new Response(body, {
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Cache-Control": "no-store",
+        "X-Sabr-Video-Mime": started.videoMime,
+        "X-Sabr-Audio-Mime": started.audioMime,
+        "X-Sabr-Label": started.label,
+      },
+    });
+  } catch (e) {
+    endSabrSession(sessionId);
+    const msg = e instanceof Error ? e.message : "Couldn't start SABR stream";
+    throw new HttpError(422, msg);
+  }
+});
+
+misc.delete("/media/youtube/:youtubeId/sabr/:sessionId", async (c) => {
+  endSabrSession(c.req.param("sessionId"));
+  return c.body(null, 204);
 });
 
 /* ---------- export ---------- */

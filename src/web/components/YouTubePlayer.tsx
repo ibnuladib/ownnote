@@ -7,10 +7,45 @@ import {
   type ChangeEvent,
   type CSSProperties,
 } from "react";
-import { ExternalLink, Pause, Play, RotateCcw, SkipBack, SkipForward } from "lucide-react";
+import {
+  ExternalLink,
+  Maximize,
+  Pause,
+  Play,
+  RotateCcw,
+  SkipBack,
+  SkipForward,
+  Volume2,
+  VolumeX,
+} from "lucide-react";
 import { youtubeWatchUrl } from "@shared/youtube";
 import { api } from "../api";
+import { attachSabrMse, type SabrMseHandle } from "../lib/sabrMse";
 import { formatClock } from "../lib/time";
+
+type QualityOption = {
+  id: string;
+  label: string;
+  src?: string;
+  kind: "progressive" | "sabr" | "youtube";
+  height?: number;
+};
+
+const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
+
+const YT_QUALITY_LABEL: Record<string, string> = {
+  highres: "High res",
+  hd2160: "2160p",
+  hd1440: "1440p",
+  hd1080: "1080p",
+  hd720: "720p",
+  large: "480p",
+  medium: "360p",
+  small: "240p",
+  tiny: "144p",
+  auto: "Auto",
+  default: "Auto",
+};
 
 declare global {
   interface Window {
@@ -110,6 +145,14 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
   const [directSrc, setDirectSrc] = useState<string | null>(null);
   const [useDirect, setUseDirect] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
+  const [muted, setMuted] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [speed, setSpeed] = useState(1);
+  const [qualities, setQualities] = useState<QualityOption[]>([]);
+  const [qualityId, setQualityId] = useState<string>("");
+  const frameRef = useRef<HTMLDivElement>(null);
+  const sabrRef = useRef<SabrMseHandle | null>(null);
+  const sabrSessionRef = useRef<{ youtubeId: string; sessionId: string } | null>(null);
 
   const stopTick = useCallback(() => {
     clearInterval(tickRef.current);
@@ -190,10 +233,19 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
 
   const isLive = useCallback((session: Session) => session.seq === seqRef.current, []);
 
+  const stopSabr = useCallback(() => {
+    sabrRef.current?.stop();
+    sabrRef.current = null;
+    const sid = sabrSessionRef.current;
+    sabrSessionRef.current = null;
+    if (sid) api.endSabr(sid.youtubeId, sid.sessionId).catch(() => {});
+  }, []);
+
   const beginSession = useCallback(
     (youtubeId: string, startSeconds: number): Session => {
       flushSession();
       stopTick();
+      stopSabr();
       const seq = ++seqRef.current;
       const session: Session = {
         seq,
@@ -205,11 +257,60 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
       titledRef.current = null;
       setBlockReason(null);
       setBanner(null);
+      setQualities([]);
+      setQualityId("");
+      setSpeed(1);
       setClock({ pos: session.pos, dur: session.dur });
       cb.current.onProgress(youtubeId, session.pos, session.dur);
       return session;
     },
-    [flushSession, stopTick],
+    [flushSession, stopSabr, stopTick],
+  );
+
+  const playSabrQuality = useCallback(
+    async (session: Session, height: number, autoplay: boolean) => {
+      stopSabr();
+      setDirectSrc(null);
+      setUseDirect(true);
+      setPhase("direct_loading");
+      setBanner(`Starting ${height}p in-app stream…`);
+      const started = await api.startSabr(session.youtubeId, height);
+      if (!isLive(session)) {
+        api.endSabr(session.youtubeId, started.sessionId).catch(() => {});
+        return;
+      }
+      // Wait for React to mount <video> (useDirect=true, no progressive src).
+      let v = videoRef.current;
+      for (let i = 0; i < 30 && !v; i++) {
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        v = videoRef.current;
+      }
+      if (!v) throw new Error("Video element missing");
+      sabrSessionRef.current = { youtubeId: session.youtubeId, sessionId: started.sessionId };
+      const handle = attachSabrMse(v, {
+        muxUrl: started.muxUrl,
+        videoMime: started.videoMime,
+        audioMime: started.audioMime,
+      });
+      sabrRef.current = handle;
+      await handle.whenReady;
+      if (!isLive(session)) {
+        handle.stop();
+        return;
+      }
+      if (session.pos > 0) {
+        try {
+          v.currentTime = session.pos;
+        } catch {
+          /* may not be seekable yet */
+        }
+      }
+      setPhase("direct");
+      setBanner(`Playing ${started.label} in-app (YouTube embed is disabled).`);
+      wantPlayRef.current = autoplay;
+      if (autoplay) v.play().catch(() => {});
+    },
+    [isLive, stopSabr],
   );
 
   const enterDirect = useCallback(
@@ -219,6 +320,8 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
       setUseDirect(true);
       setPhase("direct_loading");
       setDirectSrc(null);
+      setQualities([]);
+      stopSabr();
       setBanner("Embed disabled — fetching an in-app stream…");
       try {
         playerRef.current?.stopVideo?.();
@@ -237,16 +340,42 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
           setClock({ pos: session.pos, dur: media.duration_seconds });
           cb.current.onProgress(session.youtubeId, session.pos, media.duration_seconds);
         }
-        // Cache-bust so a new resolve after expiry remounts cleanly.
-        setDirectSrc(`${media.src}?t=${media.expires_at}`);
-        setPhase("direct");
-        setBanner("Playing in-app (YouTube embed is disabled for this video).");
-        wantPlayRef.current = autoplay;
+        const qs: QualityOption[] = (media.qualities ?? []).map((q) => {
+          const raw = typeof q.src === "string" && q.src.startsWith("/") ? q.src : null;
+          return {
+            id: `${q.kind}-${q.itag}`,
+            label: q.label,
+            src: raw
+              ? `${raw}${raw.includes("?") ? "&" : "?"}t=${media.expires_at}`
+              : undefined,
+            kind: q.kind,
+            height: q.height,
+          };
+        });
+        setQualities(qs);
+        const preferred =
+          qs.find((q) => q.id === `${media.kind}-${media.itag}`) ??
+          qs.find((q) => (q.height ?? 0) >= 720) ??
+          qs[0];
+        if (!preferred) throw new Error("No playable qualities");
+        setQualityId(preferred.id);
+        if (preferred.kind === "sabr") {
+          await playSabrQuality(session, preferred.height || 720, autoplay);
+        } else if (preferred.src) {
+          setDirectSrc(preferred.src);
+          setPhase("direct");
+          setBanner("Playing in-app (YouTube embed is disabled for this video).");
+          wantPlayRef.current = autoplay;
+        } else {
+          throw new Error("No playable stream URL for that quality");
+        }
       } catch (e) {
         if (!isLive(session)) return;
         modeRef.current = "youtube";
         setUseDirect(false);
         setDirectSrc(null);
+        setQualities([]);
+        stopSabr();
         setPhase("blocked");
         setBanner(null);
         setBlockReason(
@@ -256,7 +385,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
         );
       }
     },
-    [isLive],
+    [isLive, playSabrQuality, stopSabr],
   );
 
   const applyRequest = useCallback(
@@ -328,6 +457,22 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
                 setPhase("playing");
                 startTick();
                 cb.current.onState(session.youtubeId, "playing");
+                try {
+                  const levels: string[] = playerRef.current?.getAvailableQualityLevels?.() ?? [];
+                  if (levels.length) {
+                    setQualities(
+                      levels.map((qid) => ({
+                        id: qid,
+                        label: YT_QUALITY_LABEL[qid] ?? qid,
+                        kind: "youtube" as const,
+                      })),
+                    );
+                    const cur = playerRef.current?.getPlaybackQuality?.() as string | undefined;
+                    if (cur) setQualityId(cur);
+                  }
+                } catch {
+                  /* ignore */
+                }
               } else if (e.data === S.PAUSED) {
                 setPhase("paused");
                 stopTick();
@@ -615,6 +760,103 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
     flushSession();
   };
 
+  const toggleMute = () => {
+    if (modeRef.current === "direct") {
+      const v = videoRef.current;
+      if (!v) return;
+      v.muted = !v.muted;
+      setMuted(v.muted);
+      return;
+    }
+    try {
+      const p = playerRef.current;
+      if (!p) return;
+      if (p.isMuted?.()) {
+        p.unMute?.();
+        setMuted(false);
+      } else {
+        p.mute?.();
+        setMuted(true);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const onVolumeChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const next = Number(e.target.value);
+    setVolume(next);
+    setMuted(next === 0);
+    if (modeRef.current === "direct") {
+      const v = videoRef.current;
+      if (!v) return;
+      v.volume = next;
+      v.muted = next === 0;
+      return;
+    }
+    try {
+      playerRef.current?.setVolume?.(Math.round(next * 100));
+      if (next === 0) playerRef.current?.mute?.();
+      else playerRef.current?.unMute?.();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const onSpeedChange = (e: ChangeEvent<HTMLSelectElement>) => {
+    const next = Number(e.target.value);
+    setSpeed(next);
+    if (modeRef.current === "direct") {
+      const v = videoRef.current;
+      if (v) v.playbackRate = next;
+      return;
+    }
+    try {
+      playerRef.current?.setPlaybackRate?.(next);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const onQualityChange = (e: ChangeEvent<HTMLSelectElement>) => {
+    const next = e.target.value;
+    setQualityId(next);
+    if (modeRef.current === "direct") {
+      const q = qualities.find((x) => x.id === next);
+      const session = sessionRef.current;
+      if (!q || !session) return;
+      const wasPlaying = phase === "playing" || wantPlayRef.current;
+      if (q.kind === "sabr") {
+        void playSabrQuality(session, q.height || 720, wasPlaying).catch((err) => {
+          setBanner(err instanceof Error ? err.message : "Couldn't switch quality");
+        });
+        return;
+      }
+      if (!q.src) return;
+      stopSabr();
+      session.pos = videoRef.current?.currentTime || session.pos;
+      setDirectSrc(q.src);
+      wantPlayRef.current = wasPlaying;
+      return;
+    }
+    try {
+      playerRef.current?.setPlaybackQuality?.(next);
+      playerRef.current?.setPlaybackQualityRange?.(next, next);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const toggleFullscreen = () => {
+    const el = frameRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) {
+      void document.exitFullscreen?.();
+      return;
+    }
+    void el.requestFullscreen?.();
+  };
+
   const id = request?.youtubeId ?? null;
   const pct = clock.dur > 0 ? (clock.pos / clock.dur) * 100 : 0;
   const showPoster =
@@ -627,7 +869,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
 
   return (
     <div className="player-shell">
-      <div className="player-frame" data-empty={!request} data-phase={phase}>
+      <div ref={frameRef} className="player-frame" data-empty={!request} data-phase={phase}>
         <div
           ref={hostRef}
           className="player-host"
@@ -636,11 +878,27 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
 
         {useDirect && (
           <video
+            key={directSrc ?? `sabr-${qualityId}`}
             ref={videoRef}
             className="player-direct"
-            src={directSrc ?? undefined}
+            {...(directSrc ? { src: directSrc } : {})}
             playsInline
             preload="metadata"
+            onLoadedMetadata={() => {
+              const v = videoRef.current;
+              const session = sessionRef.current;
+              if (!v || !session || !directSrc) return;
+              if (session.pos > 0 && Math.abs(v.currentTime - session.pos) > 0.5) {
+                v.currentTime = session.pos;
+              }
+              v.playbackRate = speed;
+              v.volume = volume;
+              v.muted = muted;
+              if (wantPlayRef.current) {
+                wantPlayRef.current = false;
+                v.play().catch(() => {});
+              }
+            }}
             onPlay={() => {
               const session = sessionRef.current;
               if (!session || !isLive(session)) return;
@@ -673,9 +931,12 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
             onError={() => {
               const session = sessionRef.current;
               if (!session || !isLive(session)) return;
+              // SABR MSE errors are handled by attachSabrMse; progressive failures land here.
+              if (!directSrc) return;
               setPhase("blocked");
               setDirectSrc(null);
               setUseDirect(false);
+              stopSabr();
               modeRef.current = "youtube";
               setBanner(null);
               setBlockReason("In-app stream failed. Open the video on YouTube instead.");
@@ -729,46 +990,69 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
       )}
 
       <div className="player-controls" data-disabled={controlsDisabled}>
-        <button
-          type="button"
-          className="icon-btn"
-          onClick={() => seekBy(-10)}
-          disabled={controlsDisabled}
-          aria-label="Back 10 seconds"
-          title="-10s"
-        >
-          <SkipBack size={16} />
-        </button>
-        <button
-          type="button"
-          className="icon-btn solid"
-          onClick={togglePlay}
-          disabled={controlsDisabled}
-          aria-label={phase === "playing" ? "Pause" : "Play"}
-          title={phase === "playing" ? "Pause" : "Play"}
-        >
-          {phase === "playing" ? <Pause size={16} /> : <Play size={16} />}
-        </button>
-        <button
-          type="button"
-          className="icon-btn"
-          onClick={() => seekBy(10)}
-          disabled={controlsDisabled}
-          aria-label="Forward 10 seconds"
-          title="+10s"
-        >
-          <SkipForward size={16} />
-        </button>
-        <button
-          type="button"
-          className="icon-btn"
-          onClick={restart}
-          disabled={!request || phase === "direct_loading"}
-          aria-label="Restart"
-          title="Restart"
-        >
-          <RotateCcw size={15} />
-        </button>
+        <div className="player-transport">
+          <button
+            type="button"
+            className="icon-btn skip-btn"
+            onClick={() => seekBy(-5)}
+            disabled={controlsDisabled}
+            aria-label="Back 5 seconds"
+            title="-5s"
+          >
+            −5
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => seekBy(-10)}
+            disabled={controlsDisabled}
+            aria-label="Back 10 seconds"
+            title="-10s"
+          >
+            <SkipBack size={16} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn solid"
+            onClick={togglePlay}
+            disabled={controlsDisabled}
+            aria-label={phase === "playing" ? "Pause" : "Play"}
+            title={phase === "playing" ? "Pause" : "Play"}
+          >
+            {phase === "playing" ? <Pause size={16} /> : <Play size={16} />}
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => seekBy(10)}
+            disabled={controlsDisabled}
+            aria-label="Forward 10 seconds"
+            title="+10s"
+          >
+            <SkipForward size={16} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn skip-btn"
+            onClick={() => seekBy(5)}
+            disabled={controlsDisabled}
+            aria-label="Forward 5 seconds"
+            title="+5s"
+          >
+            +5
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={restart}
+            disabled={!request || phase === "direct_loading"}
+            aria-label="Restart"
+            title="Restart"
+          >
+            <RotateCcw size={15} />
+          </button>
+        </div>
+
         <input
           className="player-scrub"
           type="range"
@@ -786,18 +1070,88 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
         <span className="player-clock">
           {request ? `${formatClock(clock.pos)} / ${formatClock(clock.dur)}` : "–:––"}
         </span>
-        {id && (
-          <a
+
+        <div className="player-extras">
+          <button
+            type="button"
             className="icon-btn"
-            href={watchHref}
-            target="_blank"
-            rel="noreferrer"
-            aria-label="Open on YouTube"
-            title="Open on YouTube"
+            onClick={toggleMute}
+            disabled={controlsDisabled}
+            aria-label={muted ? "Unmute" : "Mute"}
+            title={muted ? "Unmute" : "Mute"}
           >
-            <ExternalLink size={15} />
-          </a>
-        )}
+            {muted || volume === 0 ? <VolumeX size={15} /> : <Volume2 size={15} />}
+          </button>
+          <input
+            className="player-volume"
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={muted ? 0 : volume}
+            onChange={onVolumeChange}
+            disabled={controlsDisabled}
+            aria-label="Volume"
+          />
+          <label className="player-select-wrap">
+            <span className="sr-only">Speed</span>
+            <select
+              className="player-select"
+              value={speed}
+              onChange={onSpeedChange}
+              disabled={controlsDisabled}
+              title="Playback speed"
+              aria-label="Playback speed"
+            >
+              {SPEED_OPTIONS.map((s) => (
+                <option key={s} value={s}>
+                  {s === 1 ? "1×" : `${s}×`}
+                </option>
+              ))}
+            </select>
+          </label>
+          {qualities.length > 0 && (
+            <label className="player-select-wrap">
+              <span className="sr-only">Quality</span>
+              <select
+                className="player-select"
+                value={qualityId}
+                onChange={onQualityChange}
+                disabled={controlsDisabled}
+                title="Quality"
+                aria-label="Quality"
+              >
+                {qualities.map((q) => (
+                  <option key={q.id} value={q.id}>
+                    {q.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={toggleFullscreen}
+            disabled={!request}
+            aria-label="Fullscreen"
+            title="Fullscreen"
+          >
+            <Maximize size={15} />
+          </button>
+          {id && (
+            <a
+              className="icon-btn"
+              href={watchHref}
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Open on YouTube"
+              title="Open on YouTube"
+            >
+              <ExternalLink size={15} />
+            </a>
+          )}
+        </div>
       </div>
     </div>
   );
