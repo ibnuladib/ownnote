@@ -158,7 +158,13 @@ function findDeep(obj: unknown, key: string, depth = 0): unknown {
   return undefined;
 }
 
+let cookieCache: { value: string; at: number } | null = null;
+const COOKIE_TTL_MS = 10 * 60 * 1000;
+
 async function bootstrapCookies(): Promise<string> {
+  if (cookieCache && Date.now() - cookieCache.at < COOKIE_TTL_MS) {
+    return cookieCache.value;
+  }
   try {
     const home = await fetch("https://www.youtube.com/", {
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
@@ -171,8 +177,11 @@ async function bootstrapCookies(): Promise<string> {
       const pair = c.split(";")[0];
       if (pair) parts.push(pair);
     }
-    return parts.join("; ");
+    const value = parts.join("; ");
+    cookieCache = { value, at: Date.now() };
+    return value;
   } catch {
+    cookieCache = { value: "", at: Date.now() };
     return "";
   }
 }
@@ -269,14 +278,14 @@ export async function resolveAndroidCatalog(youtubeId: string): Promise<Resolved
     throw new Error("No stream available for this video");
   }
 
-  // Prefer 720p SABR by default — 1080p over Workers MSE is often too heavy.
+  // Prefer progressive for instant start; SABR (≤720p) stays in the quality menu.
   const sabrQs = qualities.filter((q) => q.kind === "sabr");
   const preferred =
+    qualities.find((q) => q.kind === "progressive") ??
     sabrQs.find((q) => q.height === 720) ??
     sabrQs
       .filter((q) => q.height > 0 && q.height <= 720)
       .sort((a, b) => b.height - a.height)[0] ??
-    qualities.find((q) => q.kind === "progressive") ??
     sabrQs[0] ??
     qualities[0]!;
 

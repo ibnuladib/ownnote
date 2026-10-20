@@ -64,9 +64,16 @@ console.log(
   ),
 );
 if (metaRes.status !== 200) process.exit(2);
-if (!(meta.height >= 720) || meta.kind !== "sabr") {
-  console.error("FAIL: meta preferred is not SABR ≥720p");
+if (meta.kind !== "progressive") {
+  console.error("FAIL: meta preferred is not progressive (fast-start default)");
   process.exit(3);
+}
+const hasSabr720 = (meta.qualities ?? []).some(
+  (q) => q.kind === "sabr" && (q.height ?? 0) >= 720,
+);
+if (!hasSabr720) {
+  console.error("FAIL: SABR ≥720p missing from quality ladder");
+  process.exit(4);
 }
 
 const startRes = await fetch(`${BASE}/api/media/youtube/${VIDEO_ID}/sabr/start`, {
@@ -151,4 +158,4 @@ await fetch(`${BASE}/api/media/youtube/${VIDEO_ID}/sabr/${started.sessionId}`, {
   headers: { Cookie: cookie, Origin: BASE },
 });
 
-console.error("OK: meta prefers ≥720p SABR; mux delivered video+audio frames");
+console.error("OK: meta prefers progressive; SABR ≥720p in ladder; mux delivered frames");

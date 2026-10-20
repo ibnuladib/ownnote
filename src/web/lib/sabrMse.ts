@@ -7,7 +7,7 @@ const TYPE_END = 0;
 const TYPE_VIDEO = 1;
 const TYPE_AUDIO = 2;
 /** Don't start playback until we have this much continuous media from t≈0. */
-const READY_BUFFER_S = 2.5;
+const READY_BUFFER_S = 1.0;
 const READY_TIMEOUT_MS = 60_000;
 /** Pause demux when ahead of playhead — keeps SourceBuffer from QuotaExceeded. */
 const MAX_BUFFER_AHEAD_S = 40;

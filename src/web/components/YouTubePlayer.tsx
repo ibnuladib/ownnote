@@ -37,6 +37,47 @@ type QualityOption = {
 };
 
 const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
+const EMBED_BLOCKED_KEY = "ownnote.embedBlocked";
+
+type MediaCatalog = Awaited<ReturnType<typeof api.resolveMedia>>;
+const mediaPrefetch = new Map<string, Promise<MediaCatalog>>();
+
+function prefetchMedia(youtubeId: string): Promise<MediaCatalog> {
+  let pending = mediaPrefetch.get(youtubeId);
+  if (!pending) {
+    pending = api.resolveMedia(youtubeId).catch((err) => {
+      mediaPrefetch.delete(youtubeId);
+      throw err;
+    });
+    mediaPrefetch.set(youtubeId, pending);
+  }
+  return pending;
+}
+
+function wasEmbedBlocked(youtubeId: string): boolean {
+  try {
+    const map = JSON.parse(localStorage.getItem(EMBED_BLOCKED_KEY) || "{}") as Record<
+      string,
+      boolean
+    >;
+    return map[youtubeId] === true;
+  } catch {
+    return false;
+  }
+}
+
+function markEmbedBlocked(youtubeId: string): void {
+  try {
+    const map = JSON.parse(localStorage.getItem(EMBED_BLOCKED_KEY) || "{}") as Record<
+      string,
+      boolean
+    >;
+    map[youtubeId] = true;
+    localStorage.setItem(EMBED_BLOCKED_KEY, JSON.stringify(map));
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
 
 const YT_QUALITY_LABEL: Record<string, string> = {
   highres: "High res",
@@ -353,7 +394,8 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
         /* ignore */
       }
       try {
-        const media = await api.resolveMedia(session.youtubeId);
+        // Prefetch usually started while the iframe was still failing — reuse it.
+        const media = await prefetchMedia(session.youtubeId);
         if (!isLive(session)) return;
         if (media.title && titledRef.current !== session.youtubeId) {
           titledRef.current = session.youtubeId;
@@ -377,15 +419,16 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
           };
         });
         setQualities(qs);
-        // Prefer catalog default (720p SABR), never auto-escalate to 1080p.
+        // Progressive first = near-instant play; SABR (HD) stays in the quality menu.
         const sabrQs = qs.filter((q) => q.kind === "sabr");
+        const progressive = qs.find((q) => q.kind === "progressive" && q.src);
         const preferred =
+          progressive ??
           qs.find((q) => q.id === `${media.kind}-${media.itag}`) ??
           sabrQs.find((q) => q.height === 720) ??
           sabrQs
             .filter((q) => (q.height ?? 0) > 0 && (q.height ?? 0) <= 720)
             .sort((a, b) => (b.height ?? 0) - (a.height ?? 0))[0] ??
-          qs.find((q) => q.kind === "progressive" && q.src) ??
           sabrQs[0] ??
           qs[0];
         if (!preferred) throw new Error("No playable qualities");
@@ -395,7 +438,6 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
             await playSabrQuality(session, preferred.height || 720, autoplay);
           } catch (sabrErr) {
             // Fall back to progressive (≈360p) so something still plays.
-            const progressive = qs.find((q) => q.kind === "progressive" && q.src);
             if (!progressive?.src) throw sabrErr;
             stopSabr();
             setQualityId(progressive.id);
@@ -410,7 +452,12 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
         } else if (preferred.src) {
           setDirectSrc(preferred.src);
           setPhase("direct");
-          setBanner("Playing in-app (YouTube embed is disabled for this video).");
+          const hdHint = sabrQs.some((q) => (q.height ?? 0) >= 720)
+            ? " Pick 720p in quality for HD."
+            : "";
+          setBanner(
+            `Playing in-app (YouTube embed is disabled for this video).${hdHint}`,
+          );
           wantPlayRef.current = autoplay;
         } else {
           throw new Error("No playable stream URL for that quality");
@@ -439,11 +486,21 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
       const p = playerRef.current;
       if (!p || !readyRef.current) return;
 
+      // Warm the Innertube catalog while the iframe loads / fails — cuts fallback wait.
+      void prefetchMedia(req.youtubeId);
+
       modeRef.current = "youtube";
       setUseDirect(false);
       setDirectSrc(null);
       const session = beginSession(req.youtubeId, req.startSeconds);
       wantPlayRef.current = req.play;
+
+      // Skip the slow iframe error path for videos we already know block embeds.
+      if (wasEmbedBlocked(req.youtubeId)) {
+        void enterDirect(session, req.play);
+        return;
+      }
+
       setPhase("ready");
 
       const args = {
@@ -464,6 +521,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
           p.cueVideoById(args);
         }
       } catch {
+        markEmbedBlocked(req.youtubeId);
         void enterDirect(session, req.play);
       }
     },
@@ -566,6 +624,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
               if (!session || !isLive(session)) return;
               stopTick();
               if (e.data === 101 || e.data === 150 || e.data === 153) {
+                markEmbedBlocked(session.youtubeId);
                 void enterDirect(session, true);
                 return;
               }
@@ -577,6 +636,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
                 setBlockReason("Invalid video id.");
               } else {
                 // Other embed failures — still try the in-app stream.
+                markEmbedBlocked(session.youtubeId);
                 void enterDirect(session, wantPlayRef.current);
               }
             },
@@ -641,6 +701,8 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
       }
       return;
     }
+    // Always warm catalog early (cue, play, or API-missing fallback).
+    void prefetchMedia(request.youtubeId);
     if (apiMissingRef.current) {
       const session = beginSession(request.youtubeId, request.startSeconds);
       void enterDirect(session, request.play);

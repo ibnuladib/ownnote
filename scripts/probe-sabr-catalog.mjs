@@ -88,14 +88,14 @@ const sabrOnly = sabrReady
   ? [...byHeight.values()].filter((q) => q.height > maxProg).sort((a, b) => b.height - a.height)
   : [];
 const qualities = [...sabrOnly, ...progressive];
-// Prefer 720p SABR by default (1080p stays in the ladder for manual pick).
+// Prefer progressive for instant start; SABR ≤720p stays in the ladder.
 const sabrQs = qualities.filter((q) => q.kind === "sabr");
 const preferred =
+  qualities.find((q) => q.kind === "progressive") ??
   sabrQs.find((q) => q.height === 720) ??
   sabrQs
     .filter((q) => q.height > 0 && q.height <= 720)
     .sort((a, b) => b.height - a.height)[0] ??
-  qualities.find((q) => q.kind === "progressive") ??
   sabrQs[0] ??
   qualities[0];
 
@@ -114,8 +114,12 @@ console.log(
   ),
 );
 
-if (!preferred || preferred.height !== 720 || preferred.kind !== "sabr") {
-  console.error("FAIL: preferred is not SABR 720p");
+if (!preferred || preferred.kind !== "progressive") {
+  console.error("FAIL: preferred is not progressive (fast-start default)");
   process.exit(2);
 }
-console.error("OK: preferred SABR 720p");
+if (!sabrQs.some((q) => q.height === 720)) {
+  console.error("FAIL: 720p SABR missing from ladder");
+  process.exit(2);
+}
+console.error("OK: preferred progressive; 720p SABR in ladder");

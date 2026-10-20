@@ -80,5 +80,8 @@ if (!password || password.length < 8) {
 
 const result = await hash(password);
 console.log(`\nPASSWORD_HASH=${result}\n`);
+console.error(
+  "Put that value in .dev.vars (local) or `wrangler secret put PASSWORD_HASH` (prod). Never commit it.",
+);
 console.error("Local dev : add the line above to .dev.vars");
 console.error("Production: npx wrangler secret put PASSWORD_HASH   (paste only the value after '=')");

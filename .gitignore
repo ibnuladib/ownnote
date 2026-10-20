@@ -2,7 +2,8 @@ node_modules/
 dist/
 .wrangler/
 .dev.vars
-.dev.vars.e2e
+.dev.vars.*
+!.dev.vars.example
 .DS_Store
 *.local
 playwright-report/
@@ -12,3 +13,6 @@ coverage/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+credentials.json

@@ -1,0 +1,10 @@
+﻿# Keep local secrets out of Cursor index / context
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+!.env.example
+!.dev.vars.example
+.wrangler/
+*.sqlite
+*.sqlite-journal
