@@ -2,12 +2,14 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import TextStyle from "@tiptap/extension-text-style";
+import Highlight from "@tiptap/extension-highlight";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import Placeholder from "@tiptap/extension-placeholder";
 import {
   Bold,
   Heading2,
+  Highlighter,
   Italic,
   List,
   ListChecks,
@@ -62,6 +64,13 @@ export function NoteEditor({ note, allTags, onTitle, onContent, onPin, onDelete,
         StarterKit,
         TextStyle,
         FontSize,
+        Highlight.extend({
+          addKeyboardShortcuts() {
+            return {
+              "Mod-Shift-h": () => this.editor.commands.toggleHighlight(),
+            };
+          },
+        }).configure({ multicolor: false }),
         TaskList,
         TaskItem.configure({ nested: true }),
         Placeholder.configure({ placeholder: "Start writing. Tick things off as you learn them." }),
@@ -212,6 +221,13 @@ function Toolbar({ editor }: { editor: Editor | null }) {
     <div className="toolbar" role="toolbar" aria-label="Formatting">
       {btn("Bold", editor.isActive("bold"), () => editor.chain().focus().toggleBold().run(), <Bold size={16} />, "Ctrl+B")}
       {btn("Italic", editor.isActive("italic"), () => editor.chain().focus().toggleItalic().run(), <Italic size={16} />, "Ctrl+I")}
+      {btn(
+        "Highlight",
+        editor.isActive("highlight"),
+        () => editor.chain().focus().toggleHighlight().run(),
+        <Highlighter size={16} />,
+        "Ctrl+Shift+H",
+      )}
       {btn("Heading", editor.isActive("heading", { level: 2 }), () => editor.chain().focus().toggleHeading({ level: 2 }).run(), <Heading2 size={16} />)}
       <span className="tb-sep" />
       <select

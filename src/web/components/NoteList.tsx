@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FilePlus2, Map as MapIcon, Search, Star } from "lucide-react";
+import { FilePlus2, FileUp, Map as MapIcon, Search, Star } from "lucide-react";
 import type { NoteSummary, TemplateMeta } from "@shared/types";
 import { relativeTime } from "../lib/time";
 
@@ -10,17 +10,20 @@ type Props = {
   selectedId: string | null;
   templates: TemplateMeta[];
   loading: boolean;
+  importing?: boolean;
   onSelect: (id: string) => void;
   onPin: (n: NoteSummary) => void;
   onTag: (tag: string | null) => void;
   onNew: () => void;
   onNewFromTemplate: (key: string, name: string) => void;
+  onImportFiles: (files: FileList | File[]) => void;
   onSearch: () => void;
 };
 
 export function NoteList(p: Props) {
   const [menu, setMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!menu) return;
@@ -101,6 +104,20 @@ export function NoteList(p: Props) {
                   <small>Alt+N</small>
                 </span>
               </button>
+              <button
+                role="menuitem"
+                disabled={p.importing}
+                onClick={() => {
+                  setMenu(false);
+                  fileRef.current?.click();
+                }}
+              >
+                <FileUp size={16} />
+                <span>
+                  <b>{p.importing ? "Importing…" : "Import Markdown"}</b>
+                  <small>.md or OwnNote JSON</small>
+                </span>
+              </button>
               {p.templates.map((t) => (
                 <button
                   role="menuitem"
@@ -161,6 +178,20 @@ export function NoteList(p: Props) {
           </>
         )}
       </div>
+
+      <input
+        ref={fileRef}
+        type="file"
+        className="sr-only"
+        accept=".md,.markdown,.txt,.json,text/markdown,text/plain,application/json"
+        multiple
+        aria-label="Import markdown or JSON notes"
+        onChange={(e) => {
+          const files = e.target.files;
+          if (files?.length) p.onImportFiles(files);
+          e.target.value = "";
+        }}
+      />
     </div>
   );
 }

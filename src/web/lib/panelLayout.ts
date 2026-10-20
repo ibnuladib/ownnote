@@ -8,7 +8,9 @@ export const WATCH_DEFAULT = 392;
 export const NOTES_MIN = 180;
 export const NOTES_MAX = 480;
 export const WATCH_MIN = 260;
-export const WATCH_MAX = 560;
+/** Absolute ceiling; live drag also leaves room for the editor. */
+export const WATCH_MAX = 1100;
+export const EDITOR_MIN = 280;
 
 function readNum(key: string, fallback: number, min: number, max: number): number {
   try {

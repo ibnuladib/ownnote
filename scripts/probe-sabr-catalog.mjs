@@ -88,9 +88,15 @@ const sabrOnly = sabrReady
   ? [...byHeight.values()].filter((q) => q.height > maxProg).sort((a, b) => b.height - a.height)
   : [];
 const qualities = [...sabrOnly, ...progressive];
+// Prefer 720p SABR by default (1080p stays in the ladder for manual pick).
+const sabrQs = qualities.filter((q) => q.kind === "sabr");
 const preferred =
-  qualities.find((q) => q.height >= 720) ??
-  qualities.find((q) => q.kind === "sabr") ??
+  sabrQs.find((q) => q.height === 720) ??
+  sabrQs
+    .filter((q) => q.height > 0 && q.height <= 720)
+    .sort((a, b) => b.height - a.height)[0] ??
+  qualities.find((q) => q.kind === "progressive") ??
+  sabrQs[0] ??
   qualities[0];
 
 console.log(
@@ -108,8 +114,8 @@ console.log(
   ),
 );
 
-if (!preferred || preferred.height < 720 || preferred.kind !== "sabr") {
-  console.error("FAIL: preferred is not SABR ≥720p");
+if (!preferred || preferred.height !== 720 || preferred.kind !== "sabr") {
+  console.error("FAIL: preferred is not SABR 720p");
   process.exit(2);
 }
-console.error("OK: preferred SABR ≥720p");
+console.error("OK: preferred SABR 720p");

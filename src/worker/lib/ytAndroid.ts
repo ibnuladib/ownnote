@@ -269,9 +269,15 @@ export async function resolveAndroidCatalog(youtubeId: string): Promise<Resolved
     throw new Error("No stream available for this video");
   }
 
+  // Prefer 720p SABR by default — 1080p over Workers MSE is often too heavy.
+  const sabrQs = qualities.filter((q) => q.kind === "sabr");
   const preferred =
-    qualities.find((q) => q.height >= 720) ??
-    qualities.find((q) => q.kind === "sabr") ??
+    sabrQs.find((q) => q.height === 720) ??
+    sabrQs
+      .filter((q) => q.height > 0 && q.height <= 720)
+      .sort((a, b) => b.height - a.height)[0] ??
+    qualities.find((q) => q.kind === "progressive") ??
+    sabrQs[0] ??
     qualities[0]!;
 
   let expiresAt = Date.now() + CACHE_TTL_MS;
@@ -408,6 +414,9 @@ export const SABR_MUX_VIDEO = 1;
 export const SABR_MUX_AUDIO = 2;
 export const SABR_MUX_END = 0;
 
+/** Coalesce tiny googlevideo chunks before framing — fewer MSE appends client-side. */
+const MUX_COALESCE = 512 * 1024;
+
 /** Multiplex video+audio SABR tracks into one request-local byte stream. */
 export function muxSabrTracks(
   videoStream: ReadableStream<Uint8Array>,
@@ -434,13 +443,40 @@ export function muxSabrTracks(
         type: number,
       ): Promise<void> => {
         const reader = stream.getReader();
+        const pending: Uint8Array[] = [];
+        let pendingLen = 0;
+        let sentBytes = 0;
+        const flush = async (force: boolean) => {
+          if (!pendingLen) return;
+          // Flush init/early media quickly; coalesce once playback can start.
+          const threshold = sentBytes < 256 * 1024 ? 24 * 1024 : MUX_COALESCE;
+          if (!force && pendingLen < threshold) return;
+          let merged: Uint8Array;
+          if (pending.length === 1) {
+            merged = pending[0]!;
+          } else {
+            merged = new Uint8Array(pendingLen);
+            let off = 0;
+            for (const c of pending) {
+              merged.set(c, off);
+              off += c.byteLength;
+            }
+          }
+          pending.length = 0;
+          pendingLen = 0;
+          sentBytes += merged.byteLength;
+          await send(type, merged);
+        };
         try {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
             if (!value?.byteLength) continue;
-            await send(type, value);
+            pending.push(value.slice());
+            pendingLen += value.byteLength;
+            await flush(false);
           }
+          await flush(true);
         } finally {
           try {
             reader.releaseLock();

@@ -25,6 +25,7 @@ import { TEMPLATES } from "@shared/templates";
 import { api, exportUrl } from "../api";
 import { parseDate } from "../lib/time";
 import {
+  EDITOR_MIN,
   NOTES_MAX,
   NOTES_MIN,
   WATCH_MAX,
@@ -36,6 +37,7 @@ import {
   saveWatchW,
 } from "../lib/panelLayout";
 import { Saver, type SaveState } from "../lib/saver";
+import { draftsFromFile } from "../lib/importMarkdown";
 import { NoteList } from "./NoteList";
 import { NoteEditor } from "./NoteEditor";
 import { VideoPanel } from "./VideoPanel";
@@ -83,7 +85,9 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
   const [pane, setPane] = useState<Pane>("write");
   const [searchOpen, setSearchOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const importRef = useRef<HTMLInputElement>(null);
 
   const layout0 = useMemo(() => loadPanelLayout(), []);
   const [notesW, setNotesW] = useState(layout0.notesW);
@@ -257,6 +261,56 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
     [notify, saver],
   );
 
+  const importFiles = useCallback(
+    async (files: FileList | File[]) => {
+      const list = [...files];
+      if (!list.length || importing) return;
+      setImporting(true);
+      void saver.flush();
+      let created = 0;
+      let failed = 0;
+      let last: Note | null = null;
+      try {
+        for (const file of list) {
+          try {
+            const drafts = await draftsFromFile(file);
+            for (const draft of drafts) {
+              const n = await api.createNote(draft.title, draft.content);
+              let note = n;
+              if (draft.tags.length) {
+                try {
+                  const tags = await api.setTags(n.id, draft.tags);
+                  note = { ...n, tags };
+                } catch {
+                  /* note exists; tags optional */
+                }
+              }
+              setNotes((l) => sortNotes([toSummary(note), ...l.filter((x) => x.id !== note.id)]));
+              last = note;
+              created++;
+            }
+          } catch {
+            failed++;
+          }
+        }
+        if (last) {
+          selectedRef.current = last.id;
+          setSelectedId(last.id);
+          setNote(last);
+          setPane("write");
+          api.putPrefs({ last_note_id: last.id }).catch(() => {});
+        }
+        refreshTags();
+        if (created && !failed) notify(created === 1 ? "Imported 1 note." : `Imported ${created} notes.`);
+        else if (created && failed) notify(`Imported ${created}; ${failed} file(s) failed.`);
+        else notify("Couldn't import those files.");
+      } finally {
+        setImporting(false);
+      }
+    },
+    [importing, notify, refreshTags, saver],
+  );
+
   const onTitle = useCallback(
     (id: string, title: string) => {
       setNotes((l) => l.map((n) => (n.id === id ? { ...n, title } : n)));
@@ -373,17 +427,31 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
     [notesW, watchW],
   );
 
-  const onResizeMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
-    const d = dragRef.current;
-    if (!d) return;
-    if (d.side === "notes") {
-      const next = Math.min(NOTES_MAX, Math.max(NOTES_MIN, d.startW + (e.clientX - d.startX)));
-      setNotesW(next);
-    } else {
-      const next = Math.min(WATCH_MAX, Math.max(WATCH_MIN, d.startW - (e.clientX - d.startX)));
-      setWatchW(next);
-    }
-  }, []);
+  const onResizeMove = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      const d = dragRef.current;
+      if (!d) return;
+      const handles = 10;
+      if (d.side === "notes") {
+        const watchSpace = watchOpen ? watchW : 0;
+        const cap = Math.min(
+          NOTES_MAX,
+          Math.max(NOTES_MIN, window.innerWidth - watchSpace - handles - EDITOR_MIN),
+        );
+        const next = Math.min(cap, Math.max(NOTES_MIN, d.startW + (e.clientX - d.startX)));
+        setNotesW(next);
+      } else {
+        const notesSpace = notesOpen ? notesW : 0;
+        const cap = Math.min(
+          WATCH_MAX,
+          Math.max(WATCH_MIN, window.innerWidth - notesSpace - handles - EDITOR_MIN),
+        );
+        const next = Math.min(cap, Math.max(WATCH_MIN, d.startW - (e.clientX - d.startX)));
+        setWatchW(next);
+      }
+    },
+    [notesOpen, notesW, watchOpen, watchW],
+  );
 
   const onResizeEnd = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     const d = dragRef.current;
@@ -517,8 +585,32 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
                   <b>Markdown</b>
                   <small>Readable anywhere</small>
                 </a>
+                <button
+                  role="menuitem"
+                  disabled={importing}
+                  onClick={() => {
+                    setExportOpen(false);
+                    importRef.current?.click();
+                  }}
+                >
+                  <b>{importing ? "Importing…" : "Import"}</b>
+                  <small>.md / OwnNote JSON</small>
+                </button>
               </div>
             )}
+            <input
+              ref={importRef}
+              type="file"
+              className="sr-only"
+              accept=".md,.markdown,.txt,.json,text/markdown,text/plain,application/json"
+              multiple
+              aria-label="Import notes"
+              onChange={(e) => {
+                const files = e.target.files;
+                if (files?.length) void importFiles(files);
+                e.target.value = "";
+              }}
+            />
           </div>
           <ThemeToggle />
           <button className="top-btn" onClick={onLogout} aria-label="Log out" title="Log out">
@@ -541,6 +633,8 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
             onTag={setActiveTag}
             onNew={() => void createBlank()}
             onNewFromTemplate={(k, n) => void createFromTemplate(k, n)}
+            onImportFiles={(files) => void importFiles(files)}
+            importing={importing}
             onSearch={() => setSearchOpen(true)}
           />
         </aside>

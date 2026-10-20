@@ -9,7 +9,7 @@ import { resolve } from "node:path";
 import { chromium } from "playwright";
 
 const VIDEO_ID = process.argv[2] || "9vM4p9NN0Ts";
-const HEIGHT = Number(process.argv[3] || 1080);
+const HEIGHT = Number(process.argv[3] || 720);
 const BASE = process.env.OWNNOTE_BASE || "http://127.0.0.1:8787";
 const TOKEN = "sabr-probe-token-ownnote-2026";
 const sessionIdHash = createHash("sha256").update(TOKEN).digest("hex");

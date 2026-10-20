@@ -48,6 +48,7 @@ function renderInline(nodes: Node[] | undefined): string {
         else if (m.type === "bold") t = `**${t}**`;
         else if (m.type === "italic") t = `*${t}*`;
         else if (m.type === "strike") t = `~~${t}~~`;
+        else if (m.type === "highlight") t = `==${t}==`;
         else if (m.type === "link" && typeof m.attrs?.href === "string") t = `[${t}](${m.attrs.href})`;
       }
       return t;

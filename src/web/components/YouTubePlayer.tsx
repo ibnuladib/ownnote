@@ -377,9 +377,16 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
           };
         });
         setQualities(qs);
+        // Prefer catalog default (720p SABR), never auto-escalate to 1080p.
+        const sabrQs = qs.filter((q) => q.kind === "sabr");
         const preferred =
           qs.find((q) => q.id === `${media.kind}-${media.itag}`) ??
-          qs.find((q) => (q.height ?? 0) >= 720) ??
+          sabrQs.find((q) => q.height === 720) ??
+          sabrQs
+            .filter((q) => (q.height ?? 0) > 0 && (q.height ?? 0) <= 720)
+            .sort((a, b) => (b.height ?? 0) - (a.height ?? 0))[0] ??
+          qs.find((q) => q.kind === "progressive" && q.src) ??
+          sabrQs[0] ??
           qs[0];
         if (!preferred) throw new Error("No playable qualities");
         setQualityId(preferred.id);
@@ -929,7 +936,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
             className="player-direct"
             {...(directSrc ? { src: directSrc } : {})}
             playsInline
-            preload="metadata"
+            preload="auto"
             onLoadedMetadata={() => {
               const v = videoRef.current;
               const session = sessionRef.current;
