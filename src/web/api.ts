@@ -112,6 +112,17 @@ export const api = {
     body: { position_seconds: number; duration_seconds?: number },
     keepalive = false,
   ) => req<WatchState>("PUT", `/api/watch/${youtubeId}`, body, keepalive),
+
+  /** Progressive MP4 for embed-disabled videos (served via Worker proxy). */
+  resolveMedia: (youtubeId: string) =>
+    req<{
+      youtubeId: string;
+      title: string;
+      duration_seconds: number;
+      mimeType: string;
+      src: string;
+      expires_at: number;
+    }>("GET", `/api/media/youtube/${youtubeId}`),
 };
 
 export const exportUrl = (format: "json" | "markdown") => `/api/export?format=${format}`;

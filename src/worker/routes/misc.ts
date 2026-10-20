@@ -5,6 +5,7 @@ import { HttpError, type AppEnv } from "../env";
 import { readJson } from "../lib/http";
 import { NOTE_ORDER, loadTags, toNote, toSummary, type NoteRow } from "../lib/notes-db";
 import { toMarkdown } from "../lib/tiptap";
+import { proxyUpstream, resolveAndroidStream } from "../lib/ytAndroid";
 import { loadVideos } from "./videos";
 
 export const misc = new Hono<AppEnv>();
@@ -163,6 +164,39 @@ misc.put("/watch/:youtubeId", async (c) => {
     .bind(id)
     .first<WatchRow>();
   return c.json({ position_seconds: r?.position_seconds ?? pos, duration_seconds: r?.duration_seconds ?? null });
+});
+
+/* ---------- embed-blocked media (Android Innertube → proxied MP4) ---------- */
+
+misc.get("/media/youtube/:youtubeId", async (c) => {
+  const id = c.req.param("youtubeId");
+  checkYtId(id);
+  try {
+    const stream = await resolveAndroidStream(id);
+    return c.json({
+      youtubeId: stream.youtubeId,
+      title: stream.title,
+      duration_seconds: stream.durationSeconds,
+      mimeType: stream.mimeType,
+      src: `/api/media/youtube/${id}/stream`,
+      expires_at: stream.expiresAt,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Couldn't resolve a stream";
+    throw new HttpError(422, msg);
+  }
+});
+
+misc.get("/media/youtube/:youtubeId/stream", async (c) => {
+  const id = c.req.param("youtubeId");
+  checkYtId(id);
+  try {
+    const stream = await resolveAndroidStream(id);
+    return proxyUpstream(stream.upstreamUrl, c.req.header("Range") ?? null);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Couldn't resolve a stream";
+    throw new HttpError(422, msg);
+  }
 });
 
 /* ---------- export ---------- */

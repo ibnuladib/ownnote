@@ -57,4 +57,30 @@ test.describe("API integration", () => {
     expect((await request.post("/api/logout")).status()).toBe(204);
     expect((await request.get("/api/notes")).status()).toBe(401);
   });
+
+  test("resolves an in-app stream for embed-blocked video 9vM4p9NN0Ts", async ({ request }) => {
+    await apiLogin(request);
+    const id = "9vM4p9NN0Ts";
+    const meta = await request.get(`/api/media/youtube/${id}`);
+    expect(meta.status(), await meta.text()).toBe(200);
+    const body = (await meta.json()) as {
+      title: string;
+      duration_seconds: number;
+      src: string;
+      mimeType: string;
+    };
+    expect(body.title.toLowerCase()).toContain("cs229");
+    expect(body.duration_seconds).toBeGreaterThan(60);
+    expect(body.src).toBe(`/api/media/youtube/${id}/stream`);
+    expect(body.mimeType).toContain("mp4");
+
+    const stream = await request.get(body.src, {
+      headers: { Range: "bytes=0-1023" },
+    });
+    expect(stream.status()).toBe(206);
+    expect(stream.headers()["content-type"] ?? "").toContain("video/mp4");
+    const buf = Buffer.from(await stream.body());
+    expect(buf.length).toBeGreaterThan(100);
+    expect(buf.slice(4, 8).toString()).toBe("ftyp");
+  });
 });

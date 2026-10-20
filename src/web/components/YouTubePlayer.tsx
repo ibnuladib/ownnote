@@ -46,7 +46,6 @@ function loadYT(): Promise<any> {
 
 export type PlayRequest = {
   youtubeId: string;
-  /** Resume point supplied by the panel — never re-fetched here. */
   startSeconds: number;
   play: boolean;
   nonce: number;
@@ -61,7 +60,16 @@ type Props = {
   onTitle: (youtubeId: string, title: string) => void;
 };
 
-type Phase = "idle" | "ready" | "playing" | "paused" | "ended" | "blocked" | "api_missing";
+type Phase =
+  | "idle"
+  | "ready"
+  | "playing"
+  | "paused"
+  | "ended"
+  | "direct"
+  | "direct_loading"
+  | "blocked"
+  | "api_missing";
 
 type Session = {
   seq: number;
@@ -74,12 +82,14 @@ const SAVE_EVERY_MS = 12_000;
 const TICK_MS = 1000;
 
 /**
- * One persistent YT.Player + per-load session token.
- * No proxy/theater fake modes. Embed-blocked videos get an honest watch link.
+ * Official YT.Player first. When the uploader disables embeds (101/150/153),
+ * fall back to an Android-Innertube progressive MP4 proxied by our Worker so
+ * playback stays inside OwnNote with real seek + progress.
  */
 export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<any>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const readyRef = useRef(false);
   const seqRef = useRef(0);
   const sessionRef = useRef<Session | null>(null);
@@ -90,19 +100,22 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
   const pendingRef = useRef<PlayRequest | null>(request);
   const wantPlayRef = useRef(false);
   const apiMissingRef = useRef(false);
+  const modeRef = useRef<"youtube" | "direct">("youtube");
   const cb = useRef({ onState, onProgress, onTitle });
   cb.current = { onState, onProgress, onTitle };
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [clock, setClock] = useState({ pos: 0, dur: 0 });
   const [blockReason, setBlockReason] = useState<string | null>(null);
+  const [directSrc, setDirectSrc] = useState<string | null>(null);
+  const [useDirect, setUseDirect] = useState(false);
+  const [banner, setBanner] = useState<string | null>(null);
 
   const stopTick = useCallback(() => {
     clearInterval(tickRef.current);
     tickRef.current = undefined;
   }, []);
 
-  /** Always persist with the session's own id — never a shared "current" ref. */
   const persistSession = useCallback((session: Session | null, keepalive = false) => {
     if (!session?.youtubeId) return;
     const pos = Math.floor(session.pos);
@@ -138,10 +151,23 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
 
   const readPlayer = useCallback(() => {
     const session = sessionRef.current;
+    if (!session || session.seq !== seqRef.current || scrubbingRef.current) return;
+
+    if (modeRef.current === "direct") {
+      const v = videoRef.current;
+      if (!v) return;
+      const pos = Number(v.currentTime) || 0;
+      const dur = Number(v.duration) || session.dur;
+      if (!Number.isFinite(dur)) return;
+      session.pos = pos;
+      session.dur = dur;
+      setClock({ pos, dur });
+      cb.current.onProgress(session.youtubeId, pos, dur);
+      return;
+    }
+
     const p = playerRef.current;
-    if (!session || !p || typeof p.getCurrentTime !== "function") return;
-    if (session.seq !== seqRef.current) return;
-    if (scrubbingRef.current) return;
+    if (!p || typeof p.getCurrentTime !== "function") return;
     try {
       const pos = Number(p.getCurrentTime()) || 0;
       const dur = Number(p.getDuration()) || session.dur;
@@ -162,9 +188,10 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
     }, TICK_MS);
   }, [readPlayer, scheduleSave, stopTick]);
 
+  const isLive = useCallback((session: Session) => session.seq === seqRef.current, []);
+
   const beginSession = useCallback(
     (youtubeId: string, startSeconds: number): Session => {
-      // Save the outgoing session under ITS id before we touch anything.
       flushSession();
       stopTick();
       const seq = ++seqRef.current;
@@ -177,6 +204,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
       sessionRef.current = session;
       titledRef.current = null;
       setBlockReason(null);
+      setBanner(null);
       setClock({ pos: session.pos, dur: session.dur });
       cb.current.onProgress(youtubeId, session.pos, session.dur);
       return session;
@@ -184,13 +212,61 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
     [flushSession, stopTick],
   );
 
-  const isLive = useCallback((session: Session) => session.seq === seqRef.current, []);
+  const enterDirect = useCallback(
+    async (session: Session, autoplay: boolean) => {
+      if (!isLive(session)) return;
+      modeRef.current = "direct";
+      setUseDirect(true);
+      setPhase("direct_loading");
+      setDirectSrc(null);
+      setBanner("Embed disabled — fetching an in-app stream…");
+      try {
+        playerRef.current?.stopVideo?.();
+      } catch {
+        /* ignore */
+      }
+      try {
+        const media = await api.resolveMedia(session.youtubeId);
+        if (!isLive(session)) return;
+        if (media.title && titledRef.current !== session.youtubeId) {
+          titledRef.current = session.youtubeId;
+          cb.current.onTitle(session.youtubeId, media.title);
+        }
+        if (media.duration_seconds) {
+          session.dur = media.duration_seconds;
+          setClock({ pos: session.pos, dur: media.duration_seconds });
+          cb.current.onProgress(session.youtubeId, session.pos, media.duration_seconds);
+        }
+        // Cache-bust so a new resolve after expiry remounts cleanly.
+        setDirectSrc(`${media.src}?t=${media.expires_at}`);
+        setPhase("direct");
+        setBanner("Playing in-app (YouTube embed is disabled for this video).");
+        wantPlayRef.current = autoplay;
+      } catch (e) {
+        if (!isLive(session)) return;
+        modeRef.current = "youtube";
+        setUseDirect(false);
+        setDirectSrc(null);
+        setPhase("blocked");
+        setBanner(null);
+        setBlockReason(
+          e instanceof Error
+            ? e.message
+            : "Couldn't get an in-app stream. Open it on YouTube instead.",
+        );
+      }
+    },
+    [isLive],
+  );
 
   const applyRequest = useCallback(
     (req: PlayRequest) => {
       const p = playerRef.current;
       if (!p || !readyRef.current) return;
 
+      modeRef.current = "youtube";
+      setUseDirect(false);
+      setDirectSrc(null);
       const session = beginSession(req.youtubeId, req.startSeconds);
       wantPlayRef.current = req.play;
       setPhase("ready");
@@ -203,26 +279,22 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
       try {
         if (req.play) {
           p.loadVideoById(args);
-          // Best-effort; may be blocked until a fresh click (poster handles that).
           try {
             p.unMute?.();
             p.playVideo?.();
           } catch {
-            /* poster will show */
+            /* poster */
           }
         } else {
           p.cueVideoById(args);
         }
       } catch {
-        if (!isLive(session)) return;
-        setPhase("blocked");
-        setBlockReason("Couldn't load this video in the embedded player.");
+        void enterDirect(session, req.play);
       }
     },
-    [beginSession, isLive],
+    [beginSession, enterDirect],
   );
 
-  // Create the official player once.
   useEffect(() => {
     let cancelled = false;
     loadYT()
@@ -250,7 +322,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
             },
             onStateChange: (e: { data: number }) => {
               const session = sessionRef.current;
-              if (!session || !isLive(session)) return;
+              if (!session || !isLive(session) || modeRef.current !== "youtube") return;
               const S = YT.PlayerState;
               if (e.data === S.PLAYING) {
                 setPhase("playing");
@@ -286,9 +358,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
                     /* poster */
                   }
                 }
-              } else if (e.data === S.BUFFERING) {
-                // Stay in current phase — never treat buffering as blocked.
-              } else {
+              } else if (e.data !== S.BUFFERING) {
                 cb.current.onState(session.youtubeId, "other");
               }
 
@@ -304,21 +374,24 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
               const session = sessionRef.current;
               if (!session || !isLive(session)) return;
               stopTick();
-              setPhase("blocked");
-              // 101/150 = embedding disabled by uploader; 153 = embed config / referrer.
               if (e.data === 101 || e.data === 150 || e.data === 153) {
-                setBlockReason("This video can't be embedded. Open it on YouTube — progress still saves from the scrubber.");
-              } else if (e.data === 100) {
+                void enterDirect(session, true);
+                return;
+              }
+              if (e.data === 100) {
+                setPhase("blocked");
                 setBlockReason("This video is unavailable.");
               } else if (e.data === 2) {
+                setPhase("blocked");
                 setBlockReason("Invalid video id.");
               } else {
-                setBlockReason("YouTube couldn't play this embed.");
+                // Other embed failures — still try the in-app stream.
+                void enterDirect(session, wantPlayRef.current);
               }
             },
             onAutoplayBlocked: () => {
               const session = sessionRef.current;
-              if (!session || !isLive(session)) return;
+              if (!session || !isLive(session) || modeRef.current !== "youtube") return;
               setPhase("ready");
             },
           },
@@ -363,6 +436,10 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
       seqRef.current++;
       sessionRef.current = null;
       stopTick();
+      modeRef.current = "youtube";
+      setUseDirect(false);
+      setDirectSrc(null);
+      setBanner(null);
       setPhase(apiMissingRef.current ? "api_missing" : "idle");
       setClock({ pos: 0, dur: 0 });
       setBlockReason(apiMissingRef.current ? "YouTube player failed to load in this browser." : null);
@@ -374,17 +451,51 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
       return;
     }
     if (apiMissingRef.current) {
-      beginSession(request.youtubeId, request.startSeconds);
-      setPhase("api_missing");
-      setBlockReason("YouTube player failed to load in this browser.");
+      const session = beginSession(request.youtubeId, request.startSeconds);
+      void enterDirect(session, request.play);
       return;
     }
     if (readyRef.current) applyRequest(request);
-  }, [request, applyRequest, beginSession, flushSession, stopTick]);
+  }, [request, applyRequest, beginSession, enterDirect, flushSession, stopTick]);
+
+  // When the direct <video> mounts / src changes, seek + optional autoplay.
+  useEffect(() => {
+    if (phase !== "direct" || !directSrc) return;
+    const v = videoRef.current;
+    const session = sessionRef.current;
+    if (!v || !session) return;
+    const onMeta = () => {
+      if (!isLive(session)) return;
+      if (session.pos > 0) {
+        try {
+          v.currentTime = session.pos;
+        } catch {
+          /* ignore */
+        }
+      }
+      const dur = Number(v.duration) || session.dur;
+      if (dur) {
+        session.dur = dur;
+        setClock({ pos: session.pos, dur });
+        cb.current.onProgress(session.youtubeId, session.pos, dur);
+      }
+      if (wantPlayRef.current) {
+        wantPlayRef.current = false;
+        v.play().catch(() => setPhase("ready"));
+      }
+    };
+    v.addEventListener("loadedmetadata", onMeta);
+    if (v.readyState >= 1) onMeta();
+    return () => v.removeEventListener("loadedmetadata", onMeta);
+  }, [phase, directSrc, isLive]);
 
   const playFromGesture = () => {
     const session = sessionRef.current;
     if (!session) return;
+    if (modeRef.current === "direct") {
+      videoRef.current?.play().catch(() => {});
+      return;
+    }
     try {
       playerRef.current?.unMute?.();
       playerRef.current?.playVideo?.();
@@ -395,9 +506,17 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
 
   const togglePlay = () => {
     const session = sessionRef.current;
+    if (!session) return;
+    if (phase === "blocked" || phase === "direct_loading") return;
+    if (modeRef.current === "direct") {
+      const v = videoRef.current;
+      if (!v) return;
+      if (v.paused) v.play().catch(() => {});
+      else v.pause();
+      return;
+    }
     const p = playerRef.current;
-    if (!session || !p) return;
-    if (phase === "blocked" || phase === "api_missing") return;
+    if (!p) return;
     try {
       if (phase === "playing") p.pauseVideo();
       else {
@@ -411,8 +530,22 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
 
   const seekBy = (delta: number) => {
     const session = sessionRef.current;
+    if (!session || phase === "blocked" || phase === "direct_loading") return;
+    if (modeRef.current === "direct") {
+      const v = videoRef.current;
+      if (!v) return;
+      const dur = Number(v.duration) || session.dur;
+      const next = Math.max(0, dur ? Math.min((v.currentTime || 0) + delta, Math.max(0, dur - 0.25)) : (v.currentTime || 0) + delta);
+      v.currentTime = next;
+      session.pos = next;
+      session.dur = dur;
+      setClock({ pos: next, dur });
+      cb.current.onProgress(session.youtubeId, next, dur);
+      scheduleSave();
+      return;
+    }
     const p = playerRef.current;
-    if (!session || !p || phase === "blocked") return;
+    if (!p) return;
     try {
       const cur = Number(p.getCurrentTime()) || session.pos;
       const dur = Number(p.getDuration()) || session.dur;
@@ -441,7 +574,10 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
     const session = sessionRef.current;
     scrubbingRef.current = false;
     if (!session) return;
-    if (phase !== "blocked" && phase !== "api_missing") {
+    if (modeRef.current === "direct") {
+      const v = videoRef.current;
+      if (v) v.currentTime = session.pos;
+    } else if (phase !== "blocked" && phase !== "api_missing" && phase !== "direct_loading") {
       try {
         playerRef.current?.seekTo(session.pos, true);
       } catch {
@@ -457,6 +593,15 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
     if (!session) return;
     session.pos = 0;
     setClock({ pos: 0, dur: session.dur });
+    if (modeRef.current === "direct") {
+      const v = videoRef.current;
+      if (v) {
+        v.currentTime = 0;
+        v.play().catch(() => {});
+      }
+      flushSession();
+      return;
+    }
     if (phase === "blocked" || phase === "api_missing") {
       flushSession();
       return;
@@ -472,8 +617,10 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
 
   const id = request?.youtubeId ?? null;
   const pct = clock.dur > 0 ? (clock.pos / clock.dur) * 100 : 0;
-  const showPoster = !!id && (phase === "ready" || phase === "ended");
-  const showBlocked = !!id && (phase === "blocked" || phase === "api_missing");
+  const showPoster =
+    !!id && !useDirect && (phase === "ready" || phase === "ended");
+  const showBlocked = !!id && (phase === "blocked" || (phase === "api_missing" && !useDirect));
+  const controlsDisabled = !request || showBlocked || phase === "direct_loading";
   const watchHref = id
     ? `${youtubeWatchUrl(id)}${clock.pos > 0 ? `&t=${Math.floor(clock.pos)}s` : ""}`
     : "#";
@@ -484,8 +631,63 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
         <div
           ref={hostRef}
           className="player-host"
-          data-active={request && !showBlocked ? true : undefined}
+          data-active={request && !showBlocked && !useDirect ? true : undefined}
         />
+
+        {useDirect && (
+          <video
+            ref={videoRef}
+            className="player-direct"
+            src={directSrc ?? undefined}
+            playsInline
+            preload="metadata"
+            onPlay={() => {
+              const session = sessionRef.current;
+              if (!session || !isLive(session)) return;
+              setPhase("playing");
+              startTick();
+              cb.current.onState(session.youtubeId, "playing");
+            }}
+            onPause={() => {
+              const session = sessionRef.current;
+              if (!session || !isLive(session)) return;
+              setPhase("paused");
+              stopTick();
+              readPlayer();
+              flushSession();
+              cb.current.onState(session.youtubeId, "paused");
+            }}
+            onEnded={() => {
+              const session = sessionRef.current;
+              if (!session || !isLive(session)) return;
+              setPhase("ended");
+              stopTick();
+              const d = session.dur || Number(videoRef.current?.duration) || session.pos;
+              session.pos = d;
+              session.dur = d;
+              setClock({ pos: d, dur: d });
+              cb.current.onProgress(session.youtubeId, d, d);
+              flushSession();
+              cb.current.onState(session.youtubeId, "ended");
+            }}
+            onError={() => {
+              const session = sessionRef.current;
+              if (!session || !isLive(session)) return;
+              setPhase("blocked");
+              setDirectSrc(null);
+              setUseDirect(false);
+              modeRef.current = "youtube";
+              setBanner(null);
+              setBlockReason("In-app stream failed. Open the video on YouTube instead.");
+            }}
+          />
+        )}
+
+        {phase === "direct_loading" && (
+          <div className="player-loading" aria-live="polite">
+            Fetching in-app stream…
+          </div>
+        )}
 
         {showPoster && (
           <button type="button" className="player-poster" onClick={playFromGesture} aria-label="Play video">
@@ -517,17 +719,21 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
           </div>
         )}
 
-        {!request && (
-          <p className="player-hint">Paste a YouTube link below to start a queue.</p>
-        )}
+        {!request && <p className="player-hint">Paste a YouTube link below to start a queue.</p>}
       </div>
 
-      <div className="player-controls" data-disabled={!request}>
+      {banner && (
+        <p className="player-banner" role="status">
+          {banner}
+        </p>
+      )}
+
+      <div className="player-controls" data-disabled={controlsDisabled}>
         <button
           type="button"
           className="icon-btn"
           onClick={() => seekBy(-10)}
-          disabled={!request || showBlocked}
+          disabled={controlsDisabled}
           aria-label="Back 10 seconds"
           title="-10s"
         >
@@ -537,7 +743,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
           type="button"
           className="icon-btn solid"
           onClick={togglePlay}
-          disabled={!request || showBlocked}
+          disabled={controlsDisabled}
           aria-label={phase === "playing" ? "Pause" : "Play"}
           title={phase === "playing" ? "Pause" : "Play"}
         >
@@ -547,7 +753,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
           type="button"
           className="icon-btn"
           onClick={() => seekBy(10)}
-          disabled={!request || showBlocked}
+          disabled={controlsDisabled}
           aria-label="Forward 10 seconds"
           title="+10s"
         >
@@ -557,7 +763,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
           type="button"
           className="icon-btn"
           onClick={restart}
-          disabled={!request}
+          disabled={!request || phase === "direct_loading"}
           aria-label="Restart"
           title="Restart"
         >
@@ -573,7 +779,7 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
           onChange={onScrubInput}
           onPointerUp={commitScrub}
           onKeyUp={commitScrub}
-          disabled={!request}
+          disabled={!request || phase === "direct_loading"}
           aria-label="Seek"
           style={{ "--pct": `${pct}%` } as CSSProperties}
         />
