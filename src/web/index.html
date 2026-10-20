@@ -3,7 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#0e1214" />
+    <meta name="theme-color" content="#f1f3f6" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      // Set theme before first paint (no flash). Managed afterwards by lib/theme.ts.
+      try {
+        var p = localStorage.getItem("ownnote-theme");
+        var dark = p === "dark" || (p !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+        document.querySelector("meta[name=theme-color]").content = dark ? "#282a36" : "#f1f3f6";
+      } catch (e) {}
+    </script>
     <title>OwnNote</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />

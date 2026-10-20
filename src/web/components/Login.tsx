@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { ArrowRight, Loader2 } from "lucide-react";
 import { api, ApiError } from "../api";
+import { ThemeToggle } from "./ThemeToggle";
 
 const LOG_LINES: { text: string; state: "done" | "now" | "todo" }[] = [
   { text: "Tokenizers & embeddings", state: "done" },
@@ -33,6 +34,7 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 
   return (
     <main className="login">
+      <ThemeToggle className="login-theme" />
       <section className="login-art" aria-hidden="true">
         <h1 className="login-mark">
           <span className="rise" style={{ "--i": 0 } as React.CSSProperties}>own</span>

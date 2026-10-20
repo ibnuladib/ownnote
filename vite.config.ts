@@ -16,7 +16,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": {
+      // "/api/" (not "/api") so the src/web/api.ts module isn't swallowed by the proxy.
+      "/api/": {
         target: "http://localhost:8787",
         changeOrigin: false,
         // wrangler dev is plain http; the Secure session cookie is still

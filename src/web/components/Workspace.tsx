@@ -10,6 +10,7 @@ import { NoteList } from "./NoteList";
 import { NoteEditor } from "./NoteEditor";
 import { VideoPanel } from "./VideoPanel";
 import { SearchPalette } from "./SearchPalette";
+import { ThemeToggle } from "./ThemeToggle";
 
 type Pane = "notes" | "write" | "watch";
 
@@ -361,6 +362,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
               </div>
             )}
           </div>
+          <ThemeToggle />
           <button className="top-btn" onClick={onLogout} aria-label="Log out" title="Log out">
             <LogOut size={16} />
           </button>
