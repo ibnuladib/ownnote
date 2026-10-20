@@ -23,9 +23,6 @@ migrations_dir = "migrations"
 [observability]
 enabled = true
 
-[observability.traces]
-enabled = true
-
 # Secrets (never commit):
 #   PASSWORD_HASH  -> npx wrangler secret put PASSWORD_HASH   (see scripts/hash-password.mjs)
 # Local dev: put PASSWORD_HASH=... in .dev.vars

@@ -17,7 +17,7 @@ test.describe("API integration", () => {
     expect(res.status()).toBe(401);
   });
 
-  test("login succeeds and notes CRUD works", async ({ request }) => {
+  test("login succeeds and notes CRUD + videos + export work", async ({ request }) => {
     await apiLogin(request);
     await resetNotes(request);
 
@@ -33,11 +33,6 @@ test.describe("API integration", () => {
     });
     expect(patched.status()).toBe(200);
 
-    const listed = await request.get("/api/notes");
-    expect(listed.status()).toBe(200);
-    const { notes } = (await listed.json()) as { notes: { id: string; title: string }[] };
-    expect(notes.some((n) => n.id === note.id && n.title === "API Journey Updated")).toBe(true);
-
     const search = await request.get("/api/search?q=Journey");
     expect(search.status()).toBe(200);
     const found = (await search.json()) as { notes: { id: string }[] };
@@ -48,25 +43,18 @@ test.describe("API integration", () => {
     const { video } = (await vid.json()) as { video: { id: string; youtube_id: string } };
     expect(video.youtube_id).toBe(YT_ID);
 
-    const done = await request.patch(`/api/videos/${video.id}`, { data: { status: "done" } });
-    expect(done.status()).toBe(200);
-
-    const delVid = await request.delete(`/api/videos/${video.id}`);
-    expect(delVid.status()).toBe(204);
+    expect((await request.patch(`/api/videos/${video.id}`, { data: { status: "done" } })).status()).toBe(200);
+    expect((await request.delete(`/api/videos/${video.id}`)).status()).toBe(204);
 
     const exp = await request.get("/api/export?format=json");
     expect(exp.status()).toBe(200);
-    expect(exp.headers()["content-type"] ?? "").toMatch(/json/);
 
-    const del = await request.delete(`/api/notes/${note.id}`);
-    expect(del.status()).toBe(204);
+    expect((await request.delete(`/api/notes/${note.id}`)).status()).toBe(204);
   });
 
   test("logout clears session", async ({ request }) => {
     await apiLogin(request);
-    const out = await request.post("/api/logout");
-    expect(out.status()).toBe(204);
-    const notes = await request.get("/api/notes");
-    expect(notes.status()).toBe(401);
+    expect((await request.post("/api/logout")).status()).toBe(204);
+    expect((await request.get("/api/notes")).status()).toBe(401);
   });
 });

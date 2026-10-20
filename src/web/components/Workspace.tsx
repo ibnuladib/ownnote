@@ -107,13 +107,10 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
 
   const selectNote = useCallback(
     (id: string) => {
-      if (id === selectedRef.current) {
-        setPane("write");
-        return;
-      }
-      void saver.flush();
-      setPane("write");
       setSearchOpen(false);
+      setPane("write");
+      if (id === selectedRef.current) return;
+      void saver.flush();
       void loadNote(id);
       api.putPrefs({ last_note_id: id }).catch(() => {});
     },

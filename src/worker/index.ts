@@ -18,6 +18,15 @@ api.use("*", async (c, next) => {
 api.use("*", originCheck);
 api.use("*", requireAuth);
 
+api.get("/health", async (c) => {
+  try {
+    await c.env.DB.prepare("SELECT 1 FROM login_attempts LIMIT 1").all();
+    return c.json({ ok: true });
+  } catch {
+    return c.json({ ok: false, error: "schema not ready" }, 503);
+  }
+});
+
 api.route("/", auth);
 api.route("/", notes);
 api.route("/", videos);

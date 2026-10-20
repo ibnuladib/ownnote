@@ -33,7 +33,9 @@ function cookieSecure(url: string): boolean {
 }
 
 export const requireAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
-  if (c.req.path === "/api/login" || c.req.path === "/api/logout") return next();
+  if (c.req.path === "/api/login" || c.req.path === "/api/logout" || c.req.path === "/api/health") {
+    return next();
+  }
   const token = getCookie(c, COOKIE_NAME);
   if (!token || token.length > 200) throw new HttpError(401, "Unauthorized");
   const id = await sha256Hex(token);

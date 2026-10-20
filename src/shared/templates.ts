@@ -71,10 +71,7 @@ export function learningJourneyContent(title: string): TipTapJSON {
         attrs: { level: 2 },
         content: [{ type: "text", text: "Notes" }],
       },
-      {
-        type: "paragraph",
-        content: [{ type: "text", text: "" }],
-      },
+      { type: "paragraph" },
     ],
   };
 }

@@ -25,6 +25,8 @@ export function SearchPalette({ recent, onPick, onClose }: Props) {
       setFailed(false);
       return;
     }
+    setResults(null);
+    setFailed(false);
     const mine = ++seq.current;
     const t = setTimeout(() => {
       api
@@ -35,12 +37,16 @@ export function SearchPalette({ recent, onPick, onClose }: Props) {
           setFailed(false);
           setIdx(0);
         })
-        .catch(() => mine === seq.current && setFailed(true));
+        .catch(() => {
+          if (mine === seq.current) setFailed(true);
+        });
     }, 180);
     return () => clearTimeout(t);
   }, [q]);
 
-  const shown = results ?? recent.slice(0, 8);
+  // While a query is in flight, don't fall back to "recent" (that made search look like 8 hits).
+  const querying = !!q.trim();
+  const shown = querying ? (results ?? []) : recent.slice(0, 8);
 
   useEffect(() => {
     listRef.current?.querySelector('[data-sel="true"]')?.scrollIntoView({ block: "nearest" });
@@ -86,10 +92,17 @@ export function SearchPalette({ recent, onPick, onClose }: Props) {
           />
           <kbd>Esc</kbd>
         </div>
-        <p className="palette-label">{results ? `${results.length} found` : "Recent"}</p>
+        <p className="palette-label">
+          {querying ? (results ? `${results.length} found` : "Searching…") : "Recent"}
+        </p>
         <ul ref={listRef} role="listbox">
           {failed && <li className="palette-empty">Search failed. Try again.</li>}
-          {!failed && shown.length === 0 && <li className="palette-empty">No matching notes.</li>}
+          {!failed && querying && results === null && (
+            <li className="palette-empty">Searching…</li>
+          )}
+          {!failed && !(querying && results === null) && shown.length === 0 && (
+            <li className="palette-empty">No matching notes.</li>
+          )}
           {shown.map((n, i) => (
             <li key={n.id} role="option" aria-selected={i === idx} data-sel={i === idx}>
               <button onMouseEnter={() => setIdx(i)} onClick={() => onPick(n.id)}>

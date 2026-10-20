@@ -24,8 +24,8 @@ export default defineConfig({
     ? undefined
     : {
         command: "node tests/support/start-server.mjs",
-        // SPA root returns 200; /api/me is 401 until login (Playwright requires 2xx).
-        url: `${BASE_URL}/`,
+        // /api/health is 503 until D1 migrations finish, then 200.
+        url: `${BASE_URL}/api/health`,
         ignoreHTTPSErrors: true,
         reuseExistingServer: false,
         timeout: 180_000,
