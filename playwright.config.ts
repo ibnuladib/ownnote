@@ -1,6 +1,24 @@
+import { createServer } from "node:net";
 import { defineConfig, devices } from "@playwright/test";
 
-const PORT = Number(process.env.E2E_PORT ?? 8799);
+/** Prefer E2E_PORT; if busy, walk upward so webServer URL matches the child. */
+async function resolvePort(preferred: number): Promise<number> {
+  for (let p = preferred; p < preferred + 40; p++) {
+    const free = await new Promise<boolean>((resolve) => {
+      const s = createServer();
+      s.unref();
+      s.once("error", () => resolve(false));
+      s.once("listening", () => s.close(() => resolve(true)));
+      s.listen(p, "127.0.0.1");
+    });
+    if (free) return p;
+  }
+  throw new Error(`No free port near ${preferred}`);
+}
+
+const preferred = Number(process.env.E2E_PORT ?? 8799);
+const PORT = process.env.E2E_BASE_URL ? preferred : await resolvePort(preferred);
+process.env.E2E_PORT = String(PORT);
 const BASE_URL = process.env.E2E_BASE_URL ?? `http://127.0.0.1:${PORT}`;
 
 export default defineConfig({
@@ -27,9 +45,14 @@ export default defineConfig({
         // /api/health is 503 until D1 migrations finish, then 200.
         url: `${BASE_URL}/api/health`,
         ignoreHTTPSErrors: true,
-        reuseExistingServer: false,
+        reuseExistingServer: !process.env.CI,
         timeout: 180_000,
         stdout: "pipe",
         stderr: "pipe",
+        env: {
+          ...process.env,
+          E2E_PORT: String(PORT),
+          E2E_SKIP_BUILD: process.env.E2E_SKIP_BUILD ?? "1",
+        },
       },
 });
