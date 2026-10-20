@@ -58,9 +58,19 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
   selectedRef.current = selectedId;
   const autoplayRef = useRef(autoplay);
   autoplayRef.current = autoplay;
+  const progRef = useRef(prog);
+  progRef.current = prog;
   const nonce = useRef(0);
   const noteRef = useRef(noteId);
   noteRef.current = noteId;
+
+  const startSecondsFor = useCallback((v: NoteVideo) => {
+    const p = progRef.current[v.youtube_id];
+    const dur = p?.dur || v.duration_seconds || 0;
+    let start = p?.pos ?? v.position_seconds ?? 0;
+    if (dur && start > dur - 5) start = 0;
+    return Math.max(0, start);
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -70,10 +80,15 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
   const play = useCallback(
     (v: NoteVideo, autoStart: boolean) => {
       setSelectedId(v.id);
-      setRequest({ youtubeId: v.youtube_id, play: autoStart, nonce: ++nonce.current });
+      setRequest({
+        youtubeId: v.youtube_id,
+        startSeconds: startSecondsFor(v),
+        play: autoStart,
+        nonce: ++nonce.current,
+      });
       onVideoSelected(v.id);
     },
-    [onVideoSelected],
+    [onVideoSelected, startSecondsFor],
   );
 
   // Load videos when the note changes.
@@ -100,7 +115,15 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
           sorted[0];
         if (pick) {
           setSelectedId(pick.id);
-          setRequest({ youtubeId: pick.youtube_id, play: false, nonce: ++nonce.current });
+          const dur = pick.duration_seconds || 0;
+          let start = pick.position_seconds ?? 0;
+          if (dur && start > dur - 5) start = 0;
+          setRequest({
+            youtubeId: pick.youtube_id,
+            startSeconds: start,
+            play: false,
+            nonce: ++nonce.current,
+          });
         }
       })
       .catch(() => live && setError("Couldn't load the video list."))
@@ -224,7 +247,12 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
       const next = remaining[Math.min(idx, remaining.length - 1)];
       if (next) {
         setSelectedId(next.id);
-        setRequest({ youtubeId: next.youtube_id, play: false, nonce: ++nonce.current });
+        setRequest({
+          youtubeId: next.youtube_id,
+          startSeconds: startSecondsFor(next),
+          play: false,
+          nonce: ++nonce.current,
+        });
       } else {
         setSelectedId(null);
         setRequest(null);

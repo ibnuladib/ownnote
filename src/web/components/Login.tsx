@@ -3,13 +3,6 @@ import { ArrowRight, Loader2 } from "lucide-react";
 import { api, ApiError } from "../api";
 import { ThemeToggle } from "./ThemeToggle";
 
-const LOG_LINES: { text: string; state: "done" | "now" | "todo" }[] = [
-  { text: "Tokenizers & embeddings", state: "done" },
-  { text: "Attention, from scratch", state: "done" },
-  { text: "RAG pipelines that don't lie", state: "now" },
-  { text: "Evals for agents", state: "todo" },
-];
-
 export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -35,31 +28,14 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   return (
     <main className="login">
       <ThemeToggle className="login-theme" />
-      <section className="login-art" aria-hidden="true">
-        <h1 className="login-mark">
-          <span className="rise" style={{ "--i": 0 } as React.CSSProperties}>own</span>
-          <span className="rise hl-word" style={{ "--i": 1 } as React.CSSProperties}>note</span>
-        </h1>
-        <ol className="login-log">
-          {LOG_LINES.map((l, i) => (
-            <li
-              key={l.text}
-              data-state={l.state}
-              className="rise"
-              style={{ "--i": i + 3 } as React.CSSProperties}
-            >
-              <span className="log-n">{String(i + 1).padStart(2, "0")}</span>
-              <span className="log-t">{l.text}</span>
-              <span className="log-s">{l.state === "now" ? "watching" : l.state}</span>
-            </li>
-          ))}
-        </ol>
+      <section className="login-art">
+        <p className="login-mark">ownnote</p>
+        <p className="login-tagline">Notes and a watch queue, kept private.</p>
       </section>
 
       <section className="login-form-wrap">
-        <form className="login-form rise" style={{ "--i": 2 } as React.CSSProperties} onSubmit={submit}>
-          <p className="eyebrow">Private notebook</p>
-          <h2>Open your notes</h2>
+        <form className="login-form" onSubmit={submit}>
+          <h1>Open your notes</h1>
           <label htmlFor="pw" className="sr-only">
             Password
           </label>
@@ -69,7 +45,7 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
               type="password"
               autoFocus
               autoComplete="current-password"
-              placeholder="password"
+              placeholder="Password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               aria-invalid={!!error}

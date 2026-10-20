@@ -7,20 +7,10 @@ import {
   type ChangeEvent,
   type CSSProperties,
 } from "react";
-import {
-  ExternalLink,
-  MonitorPlay,
-  Pause,
-  Play,
-  RotateCcw,
-  SkipBack,
-  SkipForward,
-  Waypoints,
-} from "lucide-react";
+import { ExternalLink, Pause, Play, RotateCcw, SkipBack, SkipForward } from "lucide-react";
 import { youtubeWatchUrl } from "@shared/youtube";
 import { api } from "../api";
 import { formatClock } from "../lib/time";
-import { PROXY_INSTANCES, proxyEmbedUrl, youtubeEmbedUrl } from "../lib/youtubeFallback";
 
 declare global {
   interface Window {
@@ -54,9 +44,15 @@ function loadYT(): Promise<any> {
   return ytPromise;
 }
 
-export type PlayRequest = { youtubeId: string; play: boolean; nonce: number };
+export type PlayRequest = {
+  youtubeId: string;
+  /** Resume point supplied by the panel — never re-fetched here. */
+  startSeconds: number;
+  play: boolean;
+  nonce: number;
+};
+
 export type PlayerState = "playing" | "paused" | "ended" | "other";
-type Mode = "youtube" | "proxy" | "iframe" | "theater";
 
 type Props = {
   request: PlayRequest | null;
@@ -65,116 +61,94 @@ type Props = {
   onTitle: (youtubeId: string, title: string) => void;
 };
 
-const SAVE_EVERY_MS = 4000;
+type Phase = "idle" | "ready" | "playing" | "paused" | "ended" | "blocked" | "api_missing";
+
+type Session = {
+  seq: number;
+  youtubeId: string;
+  pos: number;
+  dur: number;
+};
+
+const SAVE_EVERY_MS = 12_000;
+const TICK_MS = 1000;
 
 /**
- * Multi-path player:
- * 1) Official YouTube IFrame API (best — resume + title)
- * 2) Direct nocookie embed iframe (often recovers autoplay with a click)
- * 3) Invidious proxy embeds (works when the uploader disabled YouTube embeds)
- * 4) Theater popup (watch.youtube.com window) as last resort
+ * One persistent YT.Player + per-load session token.
+ * No proxy/theater fake modes. Embed-blocked videos get an honest watch link.
  */
 export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<any>(null);
   const readyRef = useRef(false);
-  const curRef = useRef<string | null>(null);
-  const latest = useRef({ pos: 0, dur: 0 });
-  const tick = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const token = useRef(0);
-  const titled = useRef<string | null>(null);
-  const pending = useRef<PlayRequest | null>(request);
-  const wantPlay = useRef(false);
-  const theaterRef = useRef<Window | null>(null);
-  const modeRef = useRef<Mode>("youtube");
-  const watchdog = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const seqRef = useRef(0);
+  const sessionRef = useRef<Session | null>(null);
+  const titledRef = useRef<string | null>(null);
+  const scrubbingRef = useRef(false);
+  const tickRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingRef = useRef<PlayRequest | null>(request);
+  const wantPlayRef = useRef(false);
+  const apiMissingRef = useRef(false);
   const cb = useRef({ onState, onProgress, onTitle });
   cb.current = { onState, onProgress, onTitle };
 
-  const [mode, setMode] = useState<Mode>("youtube");
-  const [proxyIdx, setProxyIdx] = useState(0);
-  const [fallbackSrc, setFallbackSrc] = useState<string | null>(null);
-  const [needsGesture, setNeedsGesture] = useState(false);
-  const [apiFailed, setApiFailed] = useState(false);
-  const [playing, setPlaying] = useState(false);
+  const [phase, setPhase] = useState<Phase>("idle");
   const [clock, setClock] = useState({ pos: 0, dur: 0 });
-  const [banner, setBanner] = useState<string | null>(null);
+  const [blockReason, setBlockReason] = useState<string | null>(null);
 
-  useEffect(() => {
-    modeRef.current = mode;
-  }, [mode]);
-
-  const clearWatchdog = useCallback(() => {
-    if (watchdog.current) {
-      clearTimeout(watchdog.current);
-      watchdog.current = null;
-    }
+  const stopTick = useCallback(() => {
+    clearInterval(tickRef.current);
+    tickRef.current = undefined;
   }, []);
 
-  /** If autoplay is blocked, surface a click-to-play poster after a short wait. */
-  const armAutoplayWatchdog = useCallback(() => {
-    clearWatchdog();
-    watchdog.current = setTimeout(() => {
-      watchdog.current = null;
-      if (modeRef.current !== "youtube") return;
-      try {
-        const st = playerRef.current?.getPlayerState?.();
-        // 1 = PLAYING
-        if (st !== 1) setNeedsGesture(true);
-      } catch {
-        setNeedsGesture(true);
-      }
-    }, 1100);
-  }, [clearWatchdog]);
-
-  const persist = useCallback((keepalive = false) => {
-    const id = curRef.current;
-    const { pos, dur } = latest.current;
-    if (!id || (!pos && !dur)) return;
+  /** Always persist with the session's own id — never a shared "current" ref. */
+  const persistSession = useCallback((session: Session | null, keepalive = false) => {
+    if (!session?.youtubeId) return;
+    const pos = Math.floor(session.pos);
+    const dur = Math.floor(session.dur);
+    if (!pos && !dur) return;
     api
       .putWatch(
-        id,
-        { position_seconds: Math.floor(pos), ...(dur ? { duration_seconds: Math.floor(dur) } : {}) },
+        session.youtubeId,
+        { position_seconds: pos, ...(dur ? { duration_seconds: dur } : {}) },
         keepalive,
       )
       .catch(() => {});
   }, []);
 
-  const flushNow = useCallback(
+  const flushSession = useCallback(
     (keepalive = false) => {
-      if (saveTimer.current) {
-        clearTimeout(saveTimer.current);
-        saveTimer.current = null;
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
       }
-      persist(keepalive);
+      persistSession(sessionRef.current, keepalive);
     },
-    [persist],
+    [persistSession],
   );
 
   const scheduleSave = useCallback(() => {
-    if (saveTimer.current) return;
-    saveTimer.current = setTimeout(() => {
-      saveTimer.current = null;
-      persist();
+    if (saveTimerRef.current) return;
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      persistSession(sessionRef.current);
     }, SAVE_EVERY_MS);
-  }, [persist]);
+  }, [persistSession]);
 
-  const stopTick = useCallback(() => {
-    clearInterval(tick.current);
-    tick.current = undefined;
-  }, []);
-
-  const read = useCallback(() => {
+  const readPlayer = useCallback(() => {
+    const session = sessionRef.current;
     const p = playerRef.current;
-    const id = curRef.current;
-    if (!p || !id || typeof p.getCurrentTime !== "function") return;
+    if (!session || !p || typeof p.getCurrentTime !== "function") return;
+    if (session.seq !== seqRef.current) return;
+    if (scrubbingRef.current) return;
     try {
       const pos = Number(p.getCurrentTime()) || 0;
-      const dur = Number(p.getDuration()) || latest.current.dur;
-      latest.current = { pos, dur };
+      const dur = Number(p.getDuration()) || session.dur;
+      session.pos = pos;
+      session.dur = dur;
       setClock({ pos, dur });
-      cb.current.onProgress(id, pos, dur);
+      cb.current.onProgress(session.youtubeId, pos, dur);
     } catch {
       /* mid-swap */
     }
@@ -182,146 +156,73 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
 
   const startTick = useCallback(() => {
     stopTick();
-    tick.current = setInterval(() => {
-      read();
+    tickRef.current = setInterval(() => {
+      readPlayer();
       scheduleSave();
-    }, 500);
-  }, [read, scheduleSave, stopTick]);
+    }, TICK_MS);
+  }, [readPlayer, scheduleSave, stopTick]);
 
-  const loadResume = useCallback(async (id: string) => {
-    try {
-      const w = await api.getWatch(id);
-      const dur = w.duration_seconds ?? 0;
-      let start = w.position_seconds ?? 0;
-      if (dur && start > dur - 5) start = 0;
-      return { start, dur };
-    } catch {
-      return { start: 0, dur: 0 };
-    }
-  }, []);
-
-  const hushOfficial = useCallback(() => {
-    stopTick();
-    try {
-      playerRef.current?.stopVideo?.();
-    } catch {
-      /* ignore */
-    }
-  }, [stopTick]);
-
-  const switchToIframe = useCallback(
-    async (id: string, reason: string) => {
-      hushOfficial();
-      const { start, dur } = await loadResume(id);
-      latest.current = { pos: start, dur };
-      setClock({ pos: start, dur });
-      cb.current.onProgress(id, start, dur);
-      modeRef.current = "iframe";
-      setMode("iframe");
-      setFallbackSrc(youtubeEmbedUrl(id, start));
-      setBanner(reason);
-      setNeedsGesture(false);
-      setPlaying(true);
-      cb.current.onState(id, "playing");
+  const beginSession = useCallback(
+    (youtubeId: string, startSeconds: number): Session => {
+      // Save the outgoing session under ITS id before we touch anything.
+      flushSession();
+      stopTick();
+      const seq = ++seqRef.current;
+      const session: Session = {
+        seq,
+        youtubeId,
+        pos: Math.max(0, startSeconds),
+        dur: sessionRef.current?.youtubeId === youtubeId ? sessionRef.current.dur : 0,
+      };
+      sessionRef.current = session;
+      titledRef.current = null;
+      setBlockReason(null);
+      setClock({ pos: session.pos, dur: session.dur });
+      cb.current.onProgress(youtubeId, session.pos, session.dur);
+      return session;
     },
-    [hushOfficial, loadResume],
+    [flushSession, stopTick],
   );
 
-  const switchToProxy = useCallback(
-    async (id: string, index = 0) => {
-      hushOfficial();
-      const { start, dur } = await loadResume(id);
-      latest.current = { pos: start, dur };
-      setClock({ pos: start, dur });
-      cb.current.onProgress(id, start, dur);
-      const instance = PROXY_INSTANCES[index % PROXY_INSTANCES.length];
-      setProxyIdx(index % PROXY_INSTANCES.length);
-      modeRef.current = "proxy";
-      setMode("proxy");
-      setFallbackSrc(proxyEmbedUrl(instance, id, start));
-      setBanner(`Playing via alternate player (${new URL(instance).hostname})`);
-      setNeedsGesture(false);
-      setPlaying(true);
-      cb.current.onState(id, "playing");
-    },
-    [hushOfficial, loadResume],
-  );
+  const isLive = useCallback((session: Session) => session.seq === seqRef.current, []);
 
-  const openTheater = useCallback(
-    async (id: string) => {
-      hushOfficial();
-      const { start, dur } = await loadResume(id);
-      latest.current = { pos: start, dur };
-      setClock({ pos: start, dur });
-      cb.current.onProgress(id, start, dur);
-      const url = `${youtubeWatchUrl(id)}${start > 0 ? `&t=${Math.floor(start)}s` : ""}`;
-      try {
-        theaterRef.current?.close();
-      } catch {
-        /* ignore */
-      }
-      const w = window.open(
-        url,
-        "ownnote-theater",
-        "popup=yes,width=960,height=540,menubar=no,toolbar=no,location=yes,status=no",
-      );
-      theaterRef.current = w;
-      modeRef.current = "theater";
-      setMode("theater");
-      setFallbackSrc(null);
-      setBanner("Opened YouTube theater — scrub below to save where you left off.");
-      setPlaying(true);
-      cb.current.onState(id, "playing");
-    },
-    [hushOfficial, loadResume],
-  );
-
-  const applyYoutube = useCallback(
-    async (req: PlayRequest) => {
+  const applyRequest = useCallback(
+    (req: PlayRequest) => {
       const p = playerRef.current;
       if (!p || !readyRef.current) return;
-      flushNow();
-      stopTick();
-      setBanner(null);
-      setNeedsGesture(false);
-      setPlaying(false);
-      modeRef.current = "youtube";
-      setMode("youtube");
-      setFallbackSrc(null);
-      const id = req.youtubeId;
-      curRef.current = id;
-      titled.current = null;
-      wantPlay.current = req.play;
-      const mine = ++token.current;
-      const { start, dur } = await loadResume(id);
-      if (mine !== token.current) return;
-      latest.current = { pos: start, dur };
-      setClock({ pos: start, dur });
-      cb.current.onProgress(id, start, dur);
-      const args = { videoId: id, startSeconds: Math.max(0, Math.floor(start)) };
+
+      const session = beginSession(req.youtubeId, req.startSeconds);
+      wantPlayRef.current = req.play;
+      setPhase("ready");
+
+      const args = {
+        videoId: req.youtubeId,
+        startSeconds: Math.max(0, Math.floor(req.startSeconds)),
+      };
+
       try {
         if (req.play) {
-          // Prefer playing in the same tick as a user gesture when available.
           p.loadVideoById(args);
+          // Best-effort; may be blocked until a fresh click (poster handles that).
           try {
             p.unMute?.();
             p.playVideo?.();
-            armAutoplayWatchdog();
           } catch {
-            setNeedsGesture(true);
+            /* poster will show */
           }
         } else {
           p.cueVideoById(args);
-          setNeedsGesture(true);
         }
       } catch {
-        void switchToProxy(id, 0);
+        if (!isLive(session)) return;
+        setPhase("blocked");
+        setBlockReason("Couldn't load this video in the embedded player.");
       }
     },
-    [armAutoplayWatchdog, flushNow, loadResume, stopTick, switchToProxy],
+    [beginSession, isLive],
   );
 
-  // Create official player once.
+  // Create the official player once.
   useEffect(() => {
     let cancelled = false;
     loadYT()
@@ -339,91 +240,110 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
             modestbranding: 1,
             enablejsapi: 1,
             origin: window.location.origin,
-            widget_referrer: window.location.origin,
             autoplay: 0,
             fs: 1,
           },
           events: {
             onReady: () => {
               readyRef.current = true;
-              if (pending.current) void applyYoutube(pending.current);
+              if (pendingRef.current) applyRequest(pendingRef.current);
             },
             onStateChange: (e: { data: number }) => {
-              const id = curRef.current;
-              if (!id || modeRef.current !== "youtube") return;
+              const session = sessionRef.current;
+              if (!session || !isLive(session)) return;
               const S = YT.PlayerState;
               if (e.data === S.PLAYING) {
-                clearWatchdog();
-                setPlaying(true);
-                setNeedsGesture(false);
-                setBanner(null);
+                setPhase("playing");
                 startTick();
-                cb.current.onState(id, "playing");
+                cb.current.onState(session.youtubeId, "playing");
               } else if (e.data === S.PAUSED) {
-                setPlaying(false);
+                setPhase("paused");
                 stopTick();
-                read();
-                flushNow();
-                cb.current.onState(id, "paused");
+                readPlayer();
+                flushSession();
+                cb.current.onState(session.youtubeId, "paused");
               } else if (e.data === S.ENDED) {
-                clearWatchdog();
-                setPlaying(false);
+                setPhase("ended");
                 stopTick();
-                const d = Number(playerRef.current?.getDuration?.()) || latest.current.dur;
-                latest.current = { pos: d, dur: d };
-                setClock({ pos: d, dur: d });
-                cb.current.onProgress(id, d, d);
-                flushNow();
-                cb.current.onState(id, "ended");
+                try {
+                  const d = Number(playerRef.current?.getDuration?.()) || session.dur;
+                  session.pos = d;
+                  session.dur = d;
+                  setClock({ pos: d, dur: d });
+                  cb.current.onProgress(session.youtubeId, d, d);
+                } catch {
+                  /* ignore */
+                }
+                flushSession();
+                cb.current.onState(session.youtubeId, "ended");
               } else if (e.data === S.CUED) {
-                setPlaying(false);
-                if (wantPlay.current) {
-                  wantPlay.current = false;
+                setPhase("ready");
+                if (wantPlayRef.current) {
+                  wantPlayRef.current = false;
                   try {
                     playerRef.current?.playVideo?.();
-                    armAutoplayWatchdog();
                   } catch {
-                    setNeedsGesture(true);
+                    /* poster */
                   }
                 }
+              } else if (e.data === S.BUFFERING) {
+                // Stay in current phase — never treat buffering as blocked.
               } else {
-                cb.current.onState(id, "other");
+                cb.current.onState(session.youtubeId, "other");
               }
-              if ((e.data === S.CUED || e.data === S.PLAYING) && titled.current !== id) {
+
+              if ((e.data === S.CUED || e.data === S.PLAYING) && titledRef.current !== session.youtubeId) {
                 const t = playerRef.current?.getVideoData?.()?.title;
                 if (t) {
-                  titled.current = id;
-                  cb.current.onTitle(id, t);
+                  titledRef.current = session.youtubeId;
+                  cb.current.onTitle(session.youtubeId, t);
                 }
               }
             },
             onError: (e: { data: number }) => {
-              const id = curRef.current;
-              if (!id) return;
+              const session = sessionRef.current;
+              if (!session || !isLive(session)) return;
               stopTick();
-              setPlaying(false);
-              // 101/150 = embedding disabled → proxy. Others → try iframe then proxy.
-              if (e.data === 101 || e.data === 150) {
-                void switchToProxy(id, 0);
+              setPhase("blocked");
+              // 101/150 = embedding disabled by uploader; 153 = embed config / referrer.
+              if (e.data === 101 || e.data === 150 || e.data === 153) {
+                setBlockReason("This video can't be embedded. Open it on YouTube — progress still saves from the scrubber.");
               } else if (e.data === 100) {
-                setBanner("This video is unavailable on YouTube.");
+                setBlockReason("This video is unavailable.");
+              } else if (e.data === 2) {
+                setBlockReason("Invalid video id.");
               } else {
-                void switchToIframe(id, "Official embed hiccuped — trying a direct player…");
+                setBlockReason("YouTube couldn't play this embed.");
               }
+            },
+            onAutoplayBlocked: () => {
+              const session = sessionRef.current;
+              if (!session || !isLive(session)) return;
+              setPhase("ready");
             },
           },
         });
       })
-      .catch(() => !cancelled && setApiFailed(true));
+      .catch(() => {
+        if (!cancelled) {
+          apiMissingRef.current = true;
+          setPhase("api_missing");
+          setBlockReason("YouTube player failed to load in this browser.");
+        }
+      });
 
-    const onHide = () => flushNow(true);
-    window.addEventListener("pagehide", onHide);
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flushSession(true);
+    };
+    const onPageHide = () => flushSession(true);
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", onPageHide);
     return () => {
       cancelled = true;
-      window.removeEventListener("pagehide", onHide);
-      clearWatchdog();
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", onPageHide);
       stopTick();
-      flushNow();
+      flushSession();
       readyRef.current = false;
       try {
         playerRef.current?.destroy?.();
@@ -432,281 +352,182 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
       }
       playerRef.current = null;
       if (hostRef.current) hostRef.current.innerHTML = "";
-      try {
-        theaterRef.current?.close();
-      } catch {
-        /* ignore */
-      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    pending.current = request;
+    pendingRef.current = request;
     if (!request) {
-      token.current++;
-      flushNow();
-      curRef.current = null;
+      flushSession();
+      seqRef.current++;
+      sessionRef.current = null;
       stopTick();
-      setPlaying(false);
+      setPhase(apiMissingRef.current ? "api_missing" : "idle");
       setClock({ pos: 0, dur: 0 });
-      setFallbackSrc(null);
-      setBanner(null);
-      setNeedsGesture(false);
-      setMode("youtube");
+      setBlockReason(apiMissingRef.current ? "YouTube player failed to load in this browser." : null);
       try {
         playerRef.current?.stopVideo?.();
       } catch {
         /* ignore */
       }
-      try {
-        theaterRef.current?.close();
-      } catch {
-        /* ignore */
-      }
       return;
     }
-    curRef.current = request.youtubeId;
-    if (apiFailed) {
-      void switchToProxy(request.youtubeId, 0);
+    if (apiMissingRef.current) {
+      beginSession(request.youtubeId, request.startSeconds);
+      setPhase("api_missing");
+      setBlockReason("YouTube player failed to load in this browser.");
       return;
     }
-    if (readyRef.current) void applyYoutube(request);
-  }, [request, applyYoutube, apiFailed, flushNow, stopTick, switchToProxy]);
+    if (readyRef.current) applyRequest(request);
+  }, [request, applyRequest, beginSession, flushSession, stopTick]);
 
-  const togglePlay = () => {
-    const id = curRef.current;
-    if (!id) return;
-    if (mode === "youtube") {
-      const p = playerRef.current;
-      if (!p) return;
-      try {
-        if (playing) p.pauseVideo();
-        else {
-          p.unMute?.();
-          p.playVideo();
-          setNeedsGesture(false);
-        }
-      } catch {
-        setNeedsGesture(true);
-      }
-      return;
-    }
-    if (mode === "theater") {
-      openTheater(id);
-      return;
-    }
-    // proxy/iframe: remount with autoplay
-    setPlaying((p) => !p);
-    if (!playing) {
-      const start = latest.current.pos;
-      setFallbackSrc(
-        mode === "proxy"
-          ? proxyEmbedUrl(PROXY_INSTANCES[proxyIdx], id, start)
-          : youtubeEmbedUrl(id, start),
-      );
-      cb.current.onState(id, "playing");
+  const playFromGesture = () => {
+    const session = sessionRef.current;
+    if (!session) return;
+    try {
+      playerRef.current?.unMute?.();
+      playerRef.current?.playVideo?.();
+    } catch {
+      /* ignore */
     }
   };
 
-  const forceGesturePlay = () => {
-    const id = curRef.current;
-    if (!id) return;
-    clearWatchdog();
-    setNeedsGesture(false);
-    if (mode === "youtube") {
-      try {
-        playerRef.current?.unMute?.();
-        playerRef.current?.playVideo?.();
-        armAutoplayWatchdog();
-        // If the official player still won't start, escalate under this gesture.
-        window.setTimeout(() => {
-          if (modeRef.current !== "youtube") return;
-          try {
-            if (playerRef.current?.getPlayerState?.() !== 1) {
-              void switchToIframe(id, "Starting via direct embed (autoplay-safe)…");
-            }
-          } catch {
-            void switchToIframe(id, "Starting via direct embed (autoplay-safe)…");
-          }
-        }, 900);
-      } catch {
-        void switchToIframe(id, "Click-to-play via direct embed");
+  const togglePlay = () => {
+    const session = sessionRef.current;
+    const p = playerRef.current;
+    if (!session || !p) return;
+    if (phase === "blocked" || phase === "api_missing") return;
+    try {
+      if (phase === "playing") p.pauseVideo();
+      else {
+        p.unMute?.();
+        p.playVideo();
       }
-      return;
+    } catch {
+      /* ignore */
     }
-    togglePlay();
   };
 
   const seekBy = (delta: number) => {
-    if (mode !== "youtube") {
-      const next = Math.max(0, latest.current.pos + delta);
-      const dur = latest.current.dur;
-      latest.current = { pos: next, dur };
-      setClock({ pos: next, dur });
-      scheduleSave();
-      const id = curRef.current;
-      if (id && (mode === "proxy" || mode === "iframe")) {
-        setFallbackSrc(
-          mode === "proxy"
-            ? proxyEmbedUrl(PROXY_INSTANCES[proxyIdx], id, next)
-            : youtubeEmbedUrl(id, next),
-        );
-      }
-      return;
-    }
+    const session = sessionRef.current;
     const p = playerRef.current;
-    if (!p) return;
+    if (!session || !p || phase === "blocked") return;
     try {
-      const next = Math.max(0, (Number(p.getCurrentTime()) || 0) + delta);
-      const dur = Number(p.getDuration()) || 0;
-      p.seekTo(dur ? Math.min(next, Math.max(0, dur - 0.25)) : next, true);
-      read();
+      const cur = Number(p.getCurrentTime()) || session.pos;
+      const dur = Number(p.getDuration()) || session.dur;
+      const next = Math.max(0, dur ? Math.min(cur + delta, Math.max(0, dur - 0.25)) : cur + delta);
+      p.seekTo(next, true);
+      session.pos = next;
+      session.dur = dur;
+      setClock({ pos: next, dur });
+      cb.current.onProgress(session.youtubeId, next, dur);
       scheduleSave();
     } catch {
       /* ignore */
     }
   };
 
-  const onScrub = (e: ChangeEvent<HTMLInputElement>) => {
+  const onScrubInput = (e: ChangeEvent<HTMLInputElement>) => {
     const next = Number(e.target.value);
-    const dur = clock.dur || latest.current.dur;
-    latest.current = { pos: next, dur };
-    setClock({ pos: next, dur });
-    scheduleSave();
-    const id = curRef.current;
-    if (mode === "youtube") {
+    const session = sessionRef.current;
+    if (!session) return;
+    scrubbingRef.current = true;
+    session.pos = next;
+    setClock({ pos: next, dur: session.dur || clock.dur });
+  };
+
+  const commitScrub = () => {
+    const session = sessionRef.current;
+    scrubbingRef.current = false;
+    if (!session) return;
+    if (phase !== "blocked" && phase !== "api_missing") {
       try {
-        playerRef.current?.seekTo(next, true);
+        playerRef.current?.seekTo(session.pos, true);
       } catch {
         /* ignore */
       }
-      return;
     }
-    if (id && (mode === "proxy" || mode === "iframe")) {
-      setFallbackSrc(
-        mode === "proxy"
-          ? proxyEmbedUrl(PROXY_INSTANCES[proxyIdx], id, next)
-          : youtubeEmbedUrl(id, next),
-      );
-    }
+    cb.current.onProgress(session.youtubeId, session.pos, session.dur);
+    flushSession();
   };
 
   const restart = () => {
-    latest.current = { pos: 0, dur: latest.current.dur };
-    setClock({ pos: 0, dur: latest.current.dur });
-    if (mode === "youtube") {
-      try {
-        playerRef.current?.seekTo(0, true);
-        playerRef.current?.playVideo?.();
-      } catch {
-        /* ignore */
-      }
+    const session = sessionRef.current;
+    if (!session) return;
+    session.pos = 0;
+    setClock({ pos: 0, dur: session.dur });
+    if (phase === "blocked" || phase === "api_missing") {
+      flushSession();
       return;
     }
-    const id = curRef.current;
-    if (id && (mode === "proxy" || mode === "iframe")) {
-      setFallbackSrc(
-        mode === "proxy" ? proxyEmbedUrl(PROXY_INSTANCES[proxyIdx], id, 0) : youtubeEmbedUrl(id, 0),
-      );
-      setPlaying(true);
+    try {
+      playerRef.current?.seekTo(0, true);
+      playerRef.current?.playVideo?.();
+    } catch {
+      /* ignore */
     }
-  };
-
-  const tryNextProxy = () => {
-    const id = curRef.current;
-    if (!id) return;
-    void switchToProxy(id, proxyIdx + 1);
+    flushSession();
   };
 
   const id = request?.youtubeId ?? null;
   const pct = clock.dur > 0 ? (clock.pos / clock.dur) * 100 : 0;
-  const showYoutubeHost = mode === "youtube" && !!request;
-  const showFallbackFrame = (mode === "proxy" || mode === "iframe") && !!fallbackSrc;
+  const showPoster = !!id && (phase === "ready" || phase === "ended");
+  const showBlocked = !!id && (phase === "blocked" || phase === "api_missing");
+  const watchHref = id
+    ? `${youtubeWatchUrl(id)}${clock.pos > 0 ? `&t=${Math.floor(clock.pos)}s` : ""}`
+    : "#";
 
   return (
     <div className="player-shell">
-      <div
-        className="player-frame"
-        data-empty={!request}
-        data-mode={mode}
-      >
-        <div ref={hostRef} className="player-host" data-active={showYoutubeHost || undefined} />
-        {showFallbackFrame && (
-          <iframe
-            key={fallbackSrc}
-            className="player-fallback"
-            src={fallbackSrc!}
-            title="Video player"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-            allowFullScreen
-            referrerPolicy="strict-origin-when-cross-origin"
-          />
-        )}
-        {mode === "theater" && id && (
-          <div className="player-block">
-            <p className="player-block-title">Theater mode</p>
-            <p className="player-block-copy">
-              Playing in a YouTube window. Keep this tab open and use the scrubber to save progress.
-            </p>
-            <button type="button" className="btn-primary" onClick={() => openTheater(id)}>
-              <MonitorPlay size={16} />
-              Re-open theater
-            </button>
-          </div>
-        )}
-        {!request && !apiFailed && (
-          <p className="player-hint">Paste a YouTube link below to start a queue.</p>
-        )}
-        {needsGesture && id && mode === "youtube" && (
-          <button
-            type="button"
-            className="player-gesture"
-            onClick={forceGesturePlay}
-            style={
-              {
-                "--poster": `url(https://i.ytimg.com/vi/${id}/hqdefault.jpg)`,
-              } as CSSProperties
-            }
-          >
-            <span className="player-gesture-disc" aria-hidden>
-              <Play size={28} fill="currentColor" />
+      <div className="player-frame" data-empty={!request} data-phase={phase}>
+        <div
+          ref={hostRef}
+          className="player-host"
+          data-active={request && !showBlocked ? true : undefined}
+        />
+
+        {showPoster && (
+          <button type="button" className="player-poster" onClick={playFromGesture} aria-label="Play video">
+            <span
+              className="player-poster-bg"
+              style={{ "--poster": `url(https://i.ytimg.com/vi/${id}/hqdefault.jpg)` } as CSSProperties}
+            />
+            <span className="player-poster-disc" aria-hidden>
+              <Play size={26} fill="currentColor" />
             </span>
-            <span>Click to play</span>
-            <span className="player-gesture-sub">Uses your click so the browser allows sound</span>
           </button>
         )}
-      </div>
 
-      {banner && (
-        <div className="player-banner" role="status">
-          <span>{banner}</span>
-          <div className="player-banner-actions">
-            {mode !== "proxy" && id && (
-              <button type="button" className="text-btn" onClick={() => void switchToProxy(id, 0)}>
-                <Waypoints size={14} /> Alt player
-              </button>
-            )}
-            {mode === "proxy" && id && (
-              <button type="button" className="text-btn" onClick={tryNextProxy}>
-                Try next mirror
-              </button>
-            )}
-            {id && (
-              <button type="button" className="text-btn" onClick={() => void openTheater(id)}>
-                <MonitorPlay size={14} /> Theater
-              </button>
-            )}
+        {showBlocked && (
+          <div className="player-blocked">
+            <span
+              className="player-poster-bg"
+              style={{ "--poster": `url(https://i.ytimg.com/vi/${id}/hqdefault.jpg)` } as CSSProperties}
+            />
+            <div className="player-blocked-card">
+              <p className="player-blocked-title">Can't play here</p>
+              <p className="player-blocked-copy">{blockReason ?? "Open this video on YouTube instead."}</p>
+              <a className="btn-primary" href={watchHref} target="_blank" rel="noreferrer">
+                <ExternalLink size={15} />
+                Watch on YouTube
+                {clock.pos > 0 ? ` at ${formatClock(clock.pos)}` : ""}
+              </a>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+
+        {!request && (
+          <p className="player-hint">Paste a YouTube link below to start a queue.</p>
+        )}
+      </div>
 
       <div className="player-controls" data-disabled={!request}>
         <button
           type="button"
           className="icon-btn"
           onClick={() => seekBy(-10)}
-          disabled={!request}
+          disabled={!request || showBlocked}
           aria-label="Back 10 seconds"
           title="-10s"
         >
@@ -716,17 +537,17 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
           type="button"
           className="icon-btn solid"
           onClick={togglePlay}
-          disabled={!request}
-          aria-label={playing ? "Pause" : "Play"}
-          title={playing ? "Pause" : "Play"}
+          disabled={!request || showBlocked}
+          aria-label={phase === "playing" ? "Pause" : "Play"}
+          title={phase === "playing" ? "Pause" : "Play"}
         >
-          {playing ? <Pause size={16} /> : <Play size={16} />}
+          {phase === "playing" ? <Pause size={16} /> : <Play size={16} />}
         </button>
         <button
           type="button"
           className="icon-btn"
           onClick={() => seekBy(10)}
-          disabled={!request}
+          disabled={!request || showBlocked}
           aria-label="Forward 10 seconds"
           title="+10s"
         >
@@ -749,7 +570,9 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
           max={Math.max(1, clock.dur || 1)}
           step={0.25}
           value={Math.min(clock.pos, clock.dur || clock.pos)}
-          onChange={onScrub}
+          onChange={onScrubInput}
+          onPointerUp={commitScrub}
+          onKeyUp={commitScrub}
           disabled={!request}
           aria-label="Seek"
           style={{ "--pct": `${pct}%` } as CSSProperties}
@@ -758,36 +581,16 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
           {request ? `${formatClock(clock.pos)} / ${formatClock(clock.dur)}` : "–:––"}
         </span>
         {id && (
-          <>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => void switchToProxy(id, mode === "proxy" ? proxyIdx + 1 : 0)}
-              aria-label="Alternate player"
-              title="Alternate player (bypasses embed blocks)"
-            >
-              <Waypoints size={15} />
-            </button>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => void openTheater(id)}
-              aria-label="Theater window"
-              title="Open YouTube theater window"
-            >
-              <MonitorPlay size={15} />
-            </button>
-            <a
-              className="icon-btn"
-              href={youtubeWatchUrl(id)}
-              target="_blank"
-              rel="noreferrer"
-              aria-label="Open on YouTube"
-              title="Open on YouTube"
-            >
-              <ExternalLink size={15} />
-            </a>
-          </>
+          <a
+            className="icon-btn"
+            href={watchHref}
+            target="_blank"
+            rel="noreferrer"
+            aria-label="Open on YouTube"
+            title="Open on YouTube"
+          >
+            <ExternalLink size={15} />
+          </a>
         )}
       </div>
     </div>

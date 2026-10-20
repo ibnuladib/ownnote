@@ -465,9 +465,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
     >
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark">
-            own<span className="hl-word">note</span>
-          </span>
+          <span className="brand-mark">ownnote</span>
           <div className="panel-toggles hide-sm">
             <button
               className="top-btn"
