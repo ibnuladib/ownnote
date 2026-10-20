@@ -42,6 +42,12 @@ test.describe("login", () => {
 test.describe("workspace", () => {
   test.beforeEach(async ({ page }) => {
     await loginAndReset(page);
+    await page.addInitScript(() => {
+      localStorage.removeItem("ownnote-notes-open");
+      localStorage.removeItem("ownnote-watch-open");
+      localStorage.removeItem("ownnote-notes-w");
+      localStorage.removeItem("ownnote-watch-w");
+    });
     await page.goto("/");
     await expect(page.getByRole("heading", { name: "Notebook" })).toBeVisible();
   });
@@ -144,6 +150,42 @@ test.describe("workspace", () => {
     await expect(page.getByRole("dialog", { name: "Search notes" })).toHaveCount(0);
   });
 
+  test("hide/show notes panel via button and Ctrl+\\", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await expect(page.locator(".app")).toHaveAttribute("data-notes", "open");
+    await expect(page.getByRole("button", { name: /^New$/ })).toBeVisible();
+
+    await page.getByRole("button", { name: "Hide notes panel" }).click();
+    await expect(page.locator(".app")).toHaveAttribute("data-notes", "closed");
+    await expect(page.getByRole("button", { name: "Show notes panel" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^New$/ })).not.toBeVisible();
+
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "\\", code: "Backslash", ctrlKey: true, bubbles: true, cancelable: true }),
+      );
+    });
+    await expect(page.locator(".app")).toHaveAttribute("data-notes", "open");
+    await expect(page.getByRole("button", { name: "Hide notes panel" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^New$/ })).toBeVisible();
+
+    await page.getByRole("button", { name: "Hide watch panel" }).click();
+    await expect(page.locator(".app")).toHaveAttribute("data-watch", "closed");
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "\\",
+          code: "Backslash",
+          ctrlKey: true,
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await expect(page.locator(".app")).toHaveAttribute("data-watch", "open");
+  });
+
   test("add YouTube URL, see it in the list, mark done, then delete", async ({ page }) => {
     await newBlankNote(page);
     await page.getByLabel("Note title").fill("Video note");
@@ -162,6 +204,10 @@ test.describe("workspace", () => {
     await expect(row.locator("img.thumb")).toHaveAttribute("src", new RegExp(YT_ID));
     await expect(page.locator(".watch-head .count")).toHaveText("0/1");
     await expect(urlInput).toHaveValue("");
+    // transport chrome is present for an intuitive player
+    await expect(page.locator(".player-controls").getByRole("button", { name: "Play" })).toBeVisible();
+    await expect(page.locator(".player-scrub")).toBeAttached();
+    await expect(page.locator(".player-controls").getByRole("link", { name: "Open on YouTube" })).toBeVisible();
 
     // persisted server-side
     const { notes } = await (await page.request.get("/api/notes")).json();

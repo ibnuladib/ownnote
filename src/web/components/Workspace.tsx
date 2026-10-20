@@ -1,10 +1,40 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useHotkeys } from "react-hotkeys-hook";
-import { BookOpen, ChevronDown, Download, LogOut, PenLine, Search, Tv } from "lucide-react";
+import {
+  BookOpen,
+  ChevronDown,
+  Download,
+  LogOut,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+  PenLine,
+  Search,
+  Tv,
+} from "lucide-react";
 import type { Note, NoteSummary, TemplateMeta, TipTapJSON } from "@shared/types";
 import { TEMPLATES } from "@shared/templates";
 import { api, exportUrl } from "../api";
 import { parseDate } from "../lib/time";
+import {
+  NOTES_MAX,
+  NOTES_MIN,
+  WATCH_MAX,
+  WATCH_MIN,
+  loadPanelLayout,
+  saveNotesOpen,
+  saveNotesW,
+  saveWatchOpen,
+  saveWatchW,
+} from "../lib/panelLayout";
 import { Saver, type SaveState } from "../lib/saver";
 import { NoteList } from "./NoteList";
 import { NoteEditor } from "./NoteEditor";
@@ -55,11 +85,18 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
   const [exportOpen, setExportOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
+  const layout0 = useMemo(() => loadPanelLayout(), []);
+  const [notesW, setNotesW] = useState(layout0.notesW);
+  const [watchW, setWatchW] = useState(layout0.watchW);
+  const [notesOpen, setNotesOpen] = useState(layout0.notesOpen);
+  const [watchOpen, setWatchOpen] = useState(layout0.watchOpen);
+
   const selectedRef = useRef<string | null>(null);
   const lastVideoRef = useRef<string | null>(null);
   const [preferredVideo, setPreferredVideo] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const exportRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ side: "notes" | "watch"; startX: number; startW: number } | null>(null);
 
   const notify = useCallback((msg: string) => {
     setToast(msg);
@@ -306,6 +343,81 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
     api.putPrefs({ last_video_id: videoId }).catch(() => {});
   }, []);
 
+  const toggleNotes = useCallback(() => {
+    setNotesOpen((o) => {
+      const next = !o;
+      saveNotesOpen(next);
+      return next;
+    });
+  }, []);
+
+  const toggleWatch = useCallback(() => {
+    setWatchOpen((o) => {
+      const next = !o;
+      saveWatchOpen(next);
+      return next;
+    });
+  }, []);
+
+  const onResizeStart = useCallback(
+    (side: "notes" | "watch", e: ReactPointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      dragRef.current = {
+        side,
+        startX: e.clientX,
+        startW: side === "notes" ? notesW : watchW,
+      };
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      document.body.classList.add("is-resizing");
+    },
+    [notesW, watchW],
+  );
+
+  const onResizeMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d) return;
+    if (d.side === "notes") {
+      const next = Math.min(NOTES_MAX, Math.max(NOTES_MIN, d.startW + (e.clientX - d.startX)));
+      setNotesW(next);
+    } else {
+      const next = Math.min(WATCH_MAX, Math.max(WATCH_MIN, d.startW - (e.clientX - d.startX)));
+      setWatchW(next);
+    }
+  }, []);
+
+  const onResizeEnd = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d) return;
+    dragRef.current = null;
+    document.body.classList.remove("is-resizing");
+    try {
+      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    if (d.side === "notes") {
+      setNotesW((w) => {
+        saveNotesW(w);
+        return w;
+      });
+    } else {
+      setWatchW((w) => {
+        saveWatchW(w);
+        return w;
+      });
+    }
+  }, []);
+
+  const onResizeDblClick = useCallback((side: "notes" | "watch") => {
+    if (side === "notes") {
+      setNotesOpen(false);
+      saveNotesOpen(false);
+    } else {
+      setWatchOpen(false);
+      saveWatchOpen(false);
+    }
+  }, []);
+
   // Keyboard shortcuts (work while typing, except the video keys inside VideoPanel).
   const both = { enableOnFormTags: true, enableOnContentEditable: true, preventDefault: true } as const;
   useHotkeys("mod+k", () => setSearchOpen((o) => !o), both);
@@ -317,17 +429,65 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
     },
     both,
   );
+  // backslash is an escape char in hotkeys parsers — use the named key + a capture fallback
+  useHotkeys("mod+backslash", () => toggleNotes(), both);
+  useHotkeys("mod+shift+backslash", () => toggleWatch(), both);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      // Prefer code — key can be "\\" or "|" depending on layout / Shift
+      if (e.code !== "Backslash" && e.key !== "\\") return;
+      e.preventDefault();
+      if (e.shiftKey) toggleWatch();
+      else toggleNotes();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [toggleNotes, toggleWatch]);
 
   const tagNames = tags;
   const recent = useMemo(() => notes, [notes]);
 
+  // Always keep 5 tracks; closed panes collapse to 0 so siblings don't reflow.
+  const mainStyle = {
+    gridTemplateColumns: `${notesOpen ? notesW : 0}px ${notesOpen ? 5 : 0}px minmax(0, 1fr) ${
+      watchOpen ? 5 : 0
+    }px ${watchOpen ? watchW : 0}px`,
+  } as const;
+
   return (
-    <div className="app" data-pane={pane}>
+    <div
+      className="app"
+      data-pane={pane}
+      data-notes={notesOpen ? "open" : "closed"}
+      data-watch={watchOpen ? "open" : "closed"}
+    >
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">
             own<span className="hl-word">note</span>
           </span>
+          <div className="panel-toggles hide-sm">
+            <button
+              className="top-btn"
+              onClick={toggleNotes}
+              aria-pressed={notesOpen}
+              aria-label={notesOpen ? "Hide notes panel" : "Show notes panel"}
+              title={notesOpen ? "Hide notes (Ctrl+\\)" : "Show notes (Ctrl+\\)"}
+            >
+              {notesOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
+            </button>
+            <button
+              className="top-btn"
+              onClick={toggleWatch}
+              aria-pressed={watchOpen}
+              aria-label={watchOpen ? "Hide watch panel" : "Show watch panel"}
+              title={watchOpen ? "Hide watch (Ctrl+Shift+\\)" : "Show watch (Ctrl+Shift+\\)"}
+            >
+              {watchOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
+            </button>
+          </div>
         </div>
         <div className="topbar-right">
           <span className="save-state" data-state={saveState} role="status" aria-live="polite">
@@ -369,7 +529,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
         </div>
       </header>
 
-      <main className="main">
+      <main className="main" style={mainStyle}>
         <aside className="pane pane-notes" aria-label="Notes">
           <NoteList
             notes={recent}
@@ -386,6 +546,22 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
             onSearch={() => setSearchOpen(true)}
           />
         </aside>
+
+        <div
+          className="resize-handle"
+          data-side="notes"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize notes panel"
+          aria-valuenow={notesW}
+          aria-valuemin={NOTES_MIN}
+          aria-valuemax={NOTES_MAX}
+          onPointerDown={(e) => onResizeStart("notes", e)}
+          onPointerMove={onResizeMove}
+          onPointerUp={onResizeEnd}
+          onPointerCancel={onResizeEnd}
+          onDoubleClick={() => onResizeDblClick("notes")}
+        />
 
         <section className="pane pane-write" aria-label="Editor">
           {note ? (
@@ -416,8 +592,28 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
           )}
         </section>
 
+        <div
+          className="resize-handle"
+          data-side="watch"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize watch panel"
+          aria-valuenow={watchW}
+          aria-valuemin={WATCH_MIN}
+          aria-valuemax={WATCH_MAX}
+          onPointerDown={(e) => onResizeStart("watch", e)}
+          onPointerMove={onResizeMove}
+          onPointerUp={onResizeEnd}
+          onPointerCancel={onResizeEnd}
+          onDoubleClick={() => onResizeDblClick("watch")}
+        />
+
         <section className="pane pane-watch" aria-label="YouTube">
-          <VideoPanel noteId={note?.id ?? null} preferredVideoId={preferredVideo} onVideoSelected={onVideoSelected} />
+          <VideoPanel
+            noteId={note?.id ?? null}
+            preferredVideoId={preferredVideo}
+            onVideoSelected={onVideoSelected}
+          />
         </section>
       </main>
 

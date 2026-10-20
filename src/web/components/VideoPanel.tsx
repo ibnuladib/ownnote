@@ -21,7 +21,6 @@ import { Check, GripVertical, ListVideo, Plus, SkipBack, SkipForward, Trash2 } f
 import type { NoteVideo, VideoStatus } from "@shared/types";
 import { extractYoutubeId } from "@shared/youtube";
 import { api } from "../api";
-import { formatClock } from "../lib/time";
 import { YouTubePlayer, type PlayerState, type PlayRequest } from "./YouTubePlayer";
 
 type Props = {
@@ -169,8 +168,16 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
     const next = list[(i + dir + list.length) % list.length];
     if (next) play(next, true);
   }
-  useHotkeys("j,]", () => step(1), { preventDefault: true });
-  useHotkeys("k,[", () => step(-1), { preventDefault: true });
+  useHotkeys("j,]", () => step(1), {
+    preventDefault: true,
+    enableOnFormTags: false,
+    enableOnContentEditable: false,
+  });
+  useHotkeys("k,[", () => step(-1), {
+    preventDefault: true,
+    enableOnFormTags: false,
+    enableOnContentEditable: false,
+  });
 
   async function addUrl(raw: string) {
     if (!noteId) return;
@@ -292,18 +299,32 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
         <div className="now-text">
           <p className="now-title">{current ? current.title || current.url : "Nothing queued"}</p>
           <p className="now-time">
-            {current && curProg?.dur
-              ? `${formatClock(curProg.pos)} / ${formatClock(curProg.dur)}`
-              : current
-                ? "ready"
-                : ""}
+            {current
+              ? current.status === "done"
+                ? "done"
+                : curProg?.dur
+                  ? `${Math.round(((curProg.pos || 0) / curProg.dur) * 100)}% watched`
+                  : "ready · click play"
+              : "Add a link to build your queue"}
           </p>
         </div>
         <div className="now-ctl">
-          <button className="icon-btn" onClick={() => step(-1)} disabled={videos.length < 2} aria-label="Previous video" title="Previous (K)">
+          <button
+            className="icon-btn"
+            onClick={() => step(-1)}
+            disabled={videos.length < 2}
+            aria-label="Previous video"
+            title="Previous (K)"
+          >
             <SkipBack size={16} />
           </button>
-          <button className="icon-btn" onClick={() => step(1)} disabled={videos.length < 2} aria-label="Next video" title="Next (J)">
+          <button
+            className="icon-btn"
+            onClick={() => step(1)}
+            disabled={videos.length < 2}
+            aria-label="Next video"
+            title="Next (J)"
+          >
             <SkipForward size={16} />
           </button>
         </div>
@@ -356,10 +377,9 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
       </div>
 
       <footer className="watch-foot">
-        <span><kbd>J</kbd> next</span>
-        <span><kbd>K</kbd> prev</span>
+        <span><kbd>J</kbd>/<kbd>K</kbd> queue</span>
+        <span><kbd>Ctrl</kbd>+<kbd>\</kbd> notes</span>
         <span><kbd>Ctrl</kbd>+<kbd>K</kbd> search</span>
-        <span><kbd>Alt</kbd>+<kbd>N</kbd> new</span>
       </footer>
     </div>
   );
