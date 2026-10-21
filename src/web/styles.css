@@ -580,9 +580,56 @@ kbd {
 }
 .pane-notes {
   background: var(--pane-bg);
+  overflow: hidden;
+  container-type: inline-size;
+  container-name: notes;
+}
+.app[data-notes="open"] .pane-notes {
+  /* Keep the track from being crushed smaller than content can stay horizontal */
+  min-width: min(100%, 160px);
+}
+.app[data-notes="closed"] .pane-notes {
+  min-width: 0;
 }
 .pane-watch {
   background: var(--pane-bg);
+}
+
+/* Narrow notes pane: stay horizontal — never letter-stack into a fake vertical rail */
+@container notes (max-width: 230px) {
+  .list-head {
+    padding: 12px 10px 8px 12px;
+  }
+  .btn-new {
+    padding: 0 9px;
+    gap: 0;
+  }
+  .btn-new span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .search-trigger {
+    margin: 0 10px 8px 12px;
+    justify-content: center;
+  }
+  .search-trigger span,
+  .search-trigger kbd {
+    display: none;
+  }
+  .tag-filter {
+    display: none;
+  }
+  .list-label {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
 }
 
 .resize-handle {
@@ -732,18 +779,23 @@ body.is-resizing iframe {
   flex-direction: column;
   min-height: 0;
   height: 100%;
+  overflow: hidden;
+  min-width: 0;
 }
 .list-head,
 .watch-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 16px 14px 10px 18px;
+  min-width: 0;
 }
 .list-title {
   display: flex;
   align-items: center;
   gap: 9px;
+  min-width: 0;
 }
 .list-title h2 {
   font-size: var(--t-section);
@@ -751,6 +803,9 @@ body.is-resizing iframe {
   font-weight: 600;
   letter-spacing: 0.01em;
   color: var(--ink-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .btn-new {
   display: inline-flex;
@@ -763,6 +818,8 @@ body.is-resizing iframe {
   font-weight: 700;
   font-size: 13.5px;
   border-radius: 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
   transition: transform 0.15s var(--ease), box-shadow 0.15s;
 }
 .btn-new:hover {
@@ -780,10 +837,18 @@ body.is-resizing iframe {
   color: var(--ink-faint);
   font-size: 13.5px;
   text-align: left;
+  min-width: 0;
   transition: border-color 0.15s, color 0.15s;
 }
 .search-trigger span {
   flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search-trigger kbd {
+  flex-shrink: 0;
 }
 .search-trigger:hover {
   border-color: var(--ink-faint);

@@ -5,7 +5,9 @@ const WATCH_OPEN = "ownnote-watch-open";
 
 export const NOTES_DEFAULT = 276;
 export const WATCH_DEFAULT = 392;
-export const NOTES_MIN = 180;
+export const NOTES_MIN = 200;
+/** Dragging left of this snaps the notes pane closed (avoids letter-stack crush). */
+export const NOTES_SNAP_CLOSE = 140;
 export const NOTES_MAX = 480;
 export const WATCH_MIN = 260;
 /** Absolute ceiling; live drag also leaves room for the editor. */

@@ -28,6 +28,7 @@ import {
   EDITOR_MIN,
   NOTES_MAX,
   NOTES_MIN,
+  NOTES_SNAP_CLOSE,
   WATCH_MAX,
   WATCH_MIN,
   loadPanelLayout,
@@ -433,12 +434,27 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
       if (!d) return;
       const handles = 10;
       if (d.side === "notes") {
+        const raw = d.startW + (e.clientX - d.startX);
+        // Dragging past the snap threshold collapses the pane instead of
+        // crushing copy into a one-letter-wide vertical strip.
+        if (raw < NOTES_SNAP_CLOSE) {
+          dragRef.current = null;
+          document.body.classList.remove("is-resizing");
+          try {
+            (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+          } catch {
+            /* ignore */
+          }
+          setNotesOpen(false);
+          saveNotesOpen(false);
+          return;
+        }
         const watchSpace = watchOpen ? watchW : 0;
         const cap = Math.min(
           NOTES_MAX,
           Math.max(NOTES_MIN, window.innerWidth - watchSpace - handles - EDITOR_MIN),
         );
-        const next = Math.min(cap, Math.max(NOTES_MIN, d.startW + (e.clientX - d.startX)));
+        const next = Math.min(cap, Math.max(NOTES_MIN, raw));
         setNotesW(next);
       } else {
         const notesSpace = notesOpen ? notesW : 0;
