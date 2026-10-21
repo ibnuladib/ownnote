@@ -17,7 +17,7 @@ binding = "DB"
 database_name = "ownnote-db"
 # Replace with the id printed by: npx wrangler d1 create ownnote-db
 # (local dev via `wrangler dev` works with any placeholder value)
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "6d04ec91-f130-4d7a-8510-36dc0ea13c6b"
 migrations_dir = "migrations"
 
 [observability]
