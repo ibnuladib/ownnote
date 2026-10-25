@@ -92,6 +92,12 @@ export const api = {
   getPrefs: () => req<UserPrefs>("GET", "/api/prefs"),
   putPrefs: (p: Partial<UserPrefs>) => req<UserPrefs>("PUT", "/api/prefs", p),
 
+  // YouTube search (Innertube)
+  searchYoutube: (q: string) =>
+    req<{
+      results: Array<{ youtubeId: string; title: string; channel?: string; thumb?: string }>;
+    }>("GET", `/api/youtube/search?q=${encodeURIComponent(q)}`).then((r) => r.results),
+
   // videos
   listVideos: (noteId: string) =>
     req<{ videos: NoteVideo[] }>("GET", `/api/notes/${noteId}/videos`).then((r) => r.videos),

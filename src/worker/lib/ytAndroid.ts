@@ -196,6 +196,156 @@ function expireFromUrl(url: string, fallback: number): number {
   return fallback;
 }
 
+export type YtSearchHit = {
+  youtubeId: string;
+  title: string;
+  channel?: string;
+  thumb?: string;
+};
+
+function innertubeText(node: unknown): string {
+  if (!node || typeof node !== "object") return "";
+  const o = node as Record<string, unknown>;
+  if (typeof o.simpleText === "string") return o.simpleText.trim();
+  if (Array.isArray(o.runs)) {
+    return o.runs
+      .map((r) => (r && typeof r === "object" && typeof (r as { text?: unknown }).text === "string"
+        ? (r as { text: string }).text
+        : ""))
+      .join("")
+      .trim();
+  }
+  if (typeof o.content === "string") return o.content.trim();
+  return "";
+}
+
+function innertubeThumb(node: unknown): string | undefined {
+  if (!node || typeof node !== "object") return undefined;
+  const o = node as Record<string, unknown>;
+  const thumbs =
+    (o.thumbnail as { thumbnails?: unknown } | undefined)?.thumbnails ??
+    (o.thumbnails as unknown) ??
+    ((o.thumbnailRenderer as { thumbnail?: { thumbnails?: unknown } } | undefined)?.thumbnail
+      ?.thumbnails);
+  if (!Array.isArray(thumbs) || !thumbs.length) return undefined;
+  const last = thumbs[thumbs.length - 1] as { url?: unknown };
+  return typeof last?.url === "string" ? last.url : undefined;
+}
+
+function parseSearchVideo(node: Record<string, unknown>): YtSearchHit | null {
+  const youtubeId = typeof node.videoId === "string" ? node.videoId : null;
+  if (!youtubeId || !/^[\w-]{11}$/.test(youtubeId)) return null;
+  const title = innertubeText(node.title) || innertubeText(node.headline);
+  // accessibilityData.label is often "Title by Channel …" — last resort only
+  const a11y =
+    (
+      (node.accessibility as { accessibilityData?: { label?: string } } | undefined)
+        ?.accessibilityData?.label ?? ""
+    ).trim();
+  const resolvedTitle = title || (a11y ? a11y.split(" by ")[0]?.trim() || a11y : "");
+  if (!resolvedTitle) return null;
+  const channel =
+    innertubeText(node.ownerText) ||
+    innertubeText(node.shortBylineText) ||
+    innertubeText(node.longBylineText) ||
+    undefined;
+  const thumb = innertubeThumb(node) ?? `https://i.ytimg.com/vi/${youtubeId}/mqdefault.jpg`;
+  return {
+    youtubeId,
+    title: resolvedTitle,
+    ...(channel ? { channel } : {}),
+    thumb,
+  };
+}
+
+const SEARCH_RENDERERS = [
+  "videoRenderer",
+  "compactVideoRenderer",
+  "videoWithContextRenderer",
+] as const;
+
+function collectSearchHits(root: unknown, limit = 24): YtSearchHit[] {
+  const out: YtSearchHit[] = [];
+  const seen = new Set<string>();
+  const walk = (obj: unknown, depth: number) => {
+    if (!obj || depth > 14 || out.length >= limit) return;
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        walk(item, depth + 1);
+        if (out.length >= limit) return;
+      }
+      return;
+    }
+    if (typeof obj !== "object") return;
+    const rec = obj as Record<string, unknown>;
+    for (const key of SEARCH_RENDERERS) {
+      const block = rec[key];
+      if (block && typeof block === "object") {
+        const hit = parseSearchVideo(block as Record<string, unknown>);
+        if (hit && !seen.has(hit.youtubeId)) {
+          seen.add(hit.youtubeId);
+          out.push(hit);
+          if (out.length >= limit) return;
+        }
+      }
+    }
+    for (const v of Object.values(rec)) {
+      walk(v, depth + 1);
+      if (out.length >= limit) return;
+    }
+  };
+  walk(root, 0);
+  return out;
+}
+
+/** ANDROID Innertube search — same client as player resolution. */
+export async function searchAndroid(query: string): Promise<YtSearchHit[]> {
+  const q = query.trim().slice(0, 200);
+  if (!q) return [];
+
+  const cookie = await bootstrapCookies();
+  const body = {
+    context: {
+      client: {
+        clientName: "ANDROID",
+        clientVersion: ANDROID_VERSION,
+        androidSdkVersion: 36,
+        userAgent: ANDROID_UA,
+        hl: "en",
+        gl: "US",
+        osName: "Android",
+        osVersion: "16",
+        platform: "MOBILE",
+      },
+    },
+    query: q,
+  };
+
+  const res = await fetch("https://www.youtube.com/youtubei/v1/search?prettyPrint=false", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": ANDROID_UA,
+      "X-YouTube-Client-Name": "3",
+      "X-YouTube-Client-Version": ANDROID_VERSION,
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    throw new Error(`YouTube search failed (${res.status})`);
+  }
+
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    return [];
+  }
+  return collectSearchHits(data);
+}
+
 export async function resolveAndroidCatalog(youtubeId: string): Promise<ResolvedCatalog> {
   const hit = cache.get(youtubeId);
   if (hit && Date.now() - hit.cachedAt < CACHE_TTL_MS) {

@@ -12,6 +12,7 @@ import {
   proxyUpstream,
   resolveAndroidCatalog,
   resolveAndroidStream,
+  searchAndroid,
   startSabrStreams,
 } from "../lib/ytAndroid";
 import { loadVideos } from "./videos";
@@ -172,6 +173,20 @@ misc.put("/watch/:youtubeId", async (c) => {
     .bind(id)
     .first<WatchRow>();
   return c.json({ position_seconds: r?.position_seconds ?? pos, duration_seconds: r?.duration_seconds ?? null });
+});
+
+/* ---------- YouTube Innertube search ---------- */
+
+misc.get("/youtube/search", async (c) => {
+  const q = (c.req.query("q") ?? "").trim();
+  if (!q) throw new HttpError(400, "Query required");
+  try {
+    const results = await searchAndroid(q);
+    return c.json({ results });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "YouTube search failed";
+    throw new HttpError(502, msg);
+  }
 });
 
 /* ---------- embed-blocked media (Android Innertube → proxied MP4) ---------- */

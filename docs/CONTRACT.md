@@ -63,6 +63,14 @@ Cookie: `ownnote_session=<opaque>; HttpOnly; Secure; SameSite=Lax; Path=/`
 
 `status`: `"unwatched" | "in_progress" | "done"`
 
+## YouTube search
+
+| Method | Path | Query | Response |
+|--------|------|-------|----------|
+| GET | `/api/youtube/search` | `q` (required) | `{ "results": [{ "youtubeId", "title", "channel"?, "thumb"? }] }` |
+
+Empty `q` → `400`. Innertube fetch failure → `502`. Soft parse / no hits → `{ "results": [] }` with `200`.
+
 ## Attachments (images)
 
 | Method | Path | Body | Response |
