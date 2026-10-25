@@ -698,6 +698,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
                   setWatchOpen(true);
                   if (window.matchMedia("(max-width: 820px)").matches) setPane("watch");
                 }}
+                onNotify={notify}
               />
             </div>
           ) : (

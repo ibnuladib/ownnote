@@ -11,6 +11,7 @@ import {
   Bold,
   Heading2,
   Highlighter,
+  ImageIcon,
   Italic,
   List,
   ListChecks,
@@ -23,18 +24,55 @@ import {
   X,
 } from "lucide-react";
 import type { Note, TipTapJSON } from "@shared/types";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { TimestampChip } from "../extensions/timestampChip";
 import { FONT_SIZES, FontSize } from "./fontSize";
 import { relativeTime } from "../lib/time";
 
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 
-async function insertImageFiles(editor: Editor, noteId: string, files: File[]) {
-  const images = files.filter((f) => IMAGE_TYPES.has(f.type));
+function isImageFile(f: File): boolean {
+  return IMAGE_TYPES.has(f.type) || /\.(png|jpe?g|gif|webp)$/i.test(f.name);
+}
+
+function filesFromClipboard(data: DataTransfer | null): File[] {
+  if (!data) return [];
+  const fromFiles = Array.from(data.files ?? []).filter(isImageFile);
+  if (fromFiles.length) return fromFiles;
+  const fromItems: File[] = [];
+  for (const item of Array.from(data.items ?? [])) {
+    if (item.kind !== "file") continue;
+    const f = item.getAsFile();
+    if (f && isImageFile(f)) fromItems.push(f);
+  }
+  return fromItems;
+}
+
+async function insertImageFiles(
+  editor: Editor,
+  noteId: string,
+  files: File[],
+  onError?: (msg: string) => void,
+) {
+  const images = files.filter(isImageFile);
+  if (!images.length) return;
   for (const file of images) {
-    const { url } = await api.uploadAttachment(noteId, file);
-    editor.chain().focus().setImage({ src: url, alt: file.name || "image" }).run();
+    try {
+      const { url } = await api.uploadAttachment(noteId, file);
+      const ok = editor
+        .chain()
+        .focus()
+        .insertContent({
+          type: "image",
+          attrs: { src: url, alt: file.name || "image" },
+        })
+        .run();
+      if (!ok) onError?.("Couldn't insert the image into the note.");
+    } catch (e) {
+      const msg =
+        e instanceof ApiError ? e.message : e instanceof Error ? e.message : "Image upload failed.";
+      onError?.(msg);
+    }
   }
 }
 
@@ -49,6 +87,7 @@ type Props = {
   /** Active YouTube id + live clock from the watch pane (may be null). */
   getTimestampContext?: () => { youtubeId: string; seconds: number } | null;
   onSeekTimestamp?: (youtubeId: string, seconds: number) => void;
+  onNotify?: (msg: string) => void;
 };
 
 function isDoc(c: unknown): c is TipTapJSON {
@@ -78,17 +117,21 @@ export function NoteEditor({
   onTags,
   getTimestampContext,
   onSeekTimestamp,
+  onNotify,
 }: Props) {
   const [title, setTitle] = useState(note.title);
   const [confirming, setConfirming] = useState(false);
   const [tagDraft, setTagDraft] = useState("");
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<Editor | null>(null);
   const noteId = note.id;
   const noteIdRef = useRef(noteId);
   noteIdRef.current = noteId;
   const seekRef = useRef(onSeekTimestamp);
   seekRef.current = onSeekTimestamp;
+  const notifyRef = useRef(onNotify);
+  notifyRef.current = onNotify;
 
   const editor = useEditor(
     {
@@ -113,19 +156,23 @@ export function NoteEditor({
       editorProps: {
         attributes: { class: "prose", spellcheck: "true" },
         handlePaste(_view, event) {
-          const files = Array.from(event.clipboardData?.files ?? []);
-          if (!files.some((f) => IMAGE_TYPES.has(f.type))) return false;
+          const files = filesFromClipboard(event.clipboardData);
+          if (!files.length) return false;
           event.preventDefault();
           const ed = editorRef.current;
-          if (ed) void insertImageFiles(ed, noteIdRef.current, files).catch(() => undefined);
+          if (ed) {
+            void insertImageFiles(ed, noteIdRef.current, files, (m) => notifyRef.current?.(m));
+          }
           return true;
         },
         handleDrop(_view, event) {
-          const files = Array.from(event.dataTransfer?.files ?? []);
-          if (!files.some((f) => IMAGE_TYPES.has(f.type))) return false;
+          const files = Array.from(event.dataTransfer?.files ?? []).filter(isImageFile);
+          if (!files.length) return false;
           event.preventDefault();
           const ed = editorRef.current;
-          if (ed) void insertImageFiles(ed, noteIdRef.current, files).catch(() => undefined);
+          if (ed) {
+            void insertImageFiles(ed, noteIdRef.current, files, (m) => notifyRef.current?.(m));
+          }
           return true;
         },
         handleDOMEvents: {
@@ -257,7 +304,26 @@ export function NoteEditor({
         <span className="note-stamp">edited {relativeTime(note.updated_at)}</span>
       </div>
 
-      <Toolbar editor={editor} getTimestampContext={getTimestampContext} />
+      <Toolbar
+        editor={editor}
+        getTimestampContext={getTimestampContext}
+        onPickImage={() => imageInputRef.current?.click()}
+      />
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/gif,image/webp"
+        multiple
+        hidden
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          const ed = editorRef.current;
+          if (ed && files.length) {
+            void insertImageFiles(ed, noteIdRef.current, files, (m) => notifyRef.current?.(m));
+          }
+        }}
+      />
 
       <div className="editor-scroll" onClick={() => editor?.commands.focus()}>
         <EditorContent editor={editor} />
@@ -269,9 +335,11 @@ export function NoteEditor({
 function Toolbar({
   editor,
   getTimestampContext,
+  onPickImage,
 }: {
   editor: Editor | null;
   getTimestampContext?: () => { youtubeId: string; seconds: number } | null;
+  onPickImage: () => void;
 }) {
   if (!editor) return <div className="toolbar" />;
   const size = (editor.getAttributes("textStyle").fontSize as string | null) ?? "";
@@ -331,6 +399,7 @@ function Toolbar({
       {btn("Numbered list", editor.isActive("orderedList"), () => editor.chain().focus().toggleOrderedList().run(), <ListOrdered size={16} />)}
       {btn("Checklist", editor.isActive("taskList"), () => editor.chain().focus().toggleTaskList().run(), <ListChecks size={16} />)}
       <span className="tb-sep" />
+      {btn("Insert image", false, onPickImage, <ImageIcon size={16} />, "Upload or paste")}
       {btn(
         "Insert timestamp",
         false,
