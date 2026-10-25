@@ -1,6 +1,6 @@
 /* ─────────────────────────────────────────────────────────────
    OwnNote — quiet study desk
-   Figtree for chrome, Source Serif 4 for writing, mono only for code.
+   Figtree for chrome, Nunito for writing, mono only for code.
 
    Theme is chosen by [data-theme="light" | "dark"] on <html>
    (set before first paint from index.html, managed by lib/theme.ts).
@@ -8,7 +8,7 @@
 
 :root {
   --f-ui: "Figtree", "Segoe UI", sans-serif;
-  --f-write: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --f-write: "Nunito", "Segoe UI", system-ui, sans-serif;
   --f-code: "Spline Sans Mono", ui-monospace, Consolas, monospace;
   /* alias kept for any leftover references */
   --f-mono: var(--f-code);
@@ -1281,9 +1281,10 @@ body.is-resizing iframe {
   min-height: 50vh;
   font-family: var(--f-write);
   font-size: var(--t-note);
-  line-height: 1.65;
+  line-height: 1.7;
   color: var(--prose-ink);
-  font-variation-settings: "opsz" 18;
+  font-weight: 450;
+  letter-spacing: 0.005em;
   max-width: 66ch;
 }
 .prose > * + * {
