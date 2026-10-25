@@ -41,9 +41,10 @@ import { Saver, type SaveState } from "../lib/saver";
 import { draftsFromFile } from "../lib/importMarkdown";
 import { NoteList } from "./NoteList";
 import { NoteEditor } from "./NoteEditor";
-import { VideoPanel } from "./VideoPanel";
+import { VideoPanel, type VideoPanelHandle } from "./VideoPanel";
 import { SearchPalette } from "./SearchPalette";
 import { ThemeToggle } from "./ThemeToggle";
+import { Pomodoro } from "./Pomodoro";
 
 type Pane = "notes" | "write" | "watch";
 
@@ -89,6 +90,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
   const [importing, setImporting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
+  const videoPanelRef = useRef<VideoPanelHandle | null>(null);
 
   const layout0 = useMemo(() => loadPanelLayout(), []);
   const [notesW, setNotesW] = useState(layout0.notesW);
@@ -571,6 +573,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
             </button>
           </div>
         </div>
+        <Pomodoro />
         <div className="topbar-right">
           <span className="save-state" data-state={saveState} role="status" aria-live="polite">
             <i />
@@ -682,6 +685,19 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
                 onPin={onPin}
                 onDelete={onDelete}
                 onTags={onTags}
+                getTimestampContext={() => {
+                  const youtubeId = videoPanelRef.current?.getYoutubeId();
+                  if (!youtubeId) return null;
+                  return {
+                    youtubeId,
+                    seconds: videoPanelRef.current?.getCurrentTime() ?? 0,
+                  };
+                }}
+                onSeekTimestamp={(youtubeId, seconds) => {
+                  videoPanelRef.current?.jumpTo(youtubeId, seconds);
+                  setWatchOpen(true);
+                  if (window.matchMedia("(max-width: 820px)").matches) setPane("watch");
+                }}
               />
             </div>
           ) : (
@@ -718,6 +734,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
 
         <section className="pane pane-watch" aria-label="YouTube">
           <VideoPanel
+            ref={videoPanelRef}
             noteId={note?.id ?? null}
             preferredVideoId={preferredVideo}
             onVideoSelected={onVideoSelected}

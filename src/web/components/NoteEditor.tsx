@@ -17,12 +17,14 @@ import {
   ListOrdered,
   Redo2,
   Star,
+  Timer,
   Trash2,
   Undo2,
   X,
 } from "lucide-react";
 import type { Note, TipTapJSON } from "@shared/types";
 import { api } from "../api";
+import { TimestampChip } from "../extensions/timestampChip";
 import { FONT_SIZES, FontSize } from "./fontSize";
 import { relativeTime } from "../lib/time";
 
@@ -44,6 +46,9 @@ type Props = {
   onPin: (note: Note) => void;
   onDelete: (note: Note) => void;
   onTags: (note: Note, tags: string[]) => void;
+  /** Active YouTube id + live clock from the watch pane (may be null). */
+  getTimestampContext?: () => { youtubeId: string; seconds: number } | null;
+  onSeekTimestamp?: (youtubeId: string, seconds: number) => void;
 };
 
 function isDoc(c: unknown): c is TipTapJSON {
@@ -63,7 +68,17 @@ function cleanNode(node: unknown): unknown {
   };
 }
 
-export function NoteEditor({ note, allTags, onTitle, onContent, onPin, onDelete, onTags }: Props) {
+export function NoteEditor({
+  note,
+  allTags,
+  onTitle,
+  onContent,
+  onPin,
+  onDelete,
+  onTags,
+  getTimestampContext,
+  onSeekTimestamp,
+}: Props) {
   const [title, setTitle] = useState(note.title);
   const [confirming, setConfirming] = useState(false);
   const [tagDraft, setTagDraft] = useState("");
@@ -72,6 +87,8 @@ export function NoteEditor({ note, allTags, onTitle, onContent, onPin, onDelete,
   const noteId = note.id;
   const noteIdRef = useRef(noteId);
   noteIdRef.current = noteId;
+  const seekRef = useRef(onSeekTimestamp);
+  seekRef.current = onSeekTimestamp;
 
   const editor = useEditor(
     {
@@ -80,6 +97,7 @@ export function NoteEditor({ note, allTags, onTitle, onContent, onPin, onDelete,
         TextStyle,
         FontSize,
         Image.configure({ inline: false, allowBase64: false }),
+        TimestampChip,
         Highlight.extend({
           addKeyboardShortcuts() {
             return {
@@ -109,6 +127,20 @@ export function NoteEditor({ note, allTags, onTitle, onContent, onPin, onDelete,
           const ed = editorRef.current;
           if (ed) void insertImageFiles(ed, noteIdRef.current, files).catch(() => undefined);
           return true;
+        },
+        handleDOMEvents: {
+          click: (_view, event) => {
+            const el = (event.target as HTMLElement | null)?.closest?.(
+              "[data-timestamp-chip]",
+            ) as HTMLElement | null;
+            if (!el) return false;
+            const youtubeId = el.getAttribute("data-youtube-id") || "";
+            const seconds = Number(el.getAttribute("data-seconds") || 0);
+            if (!youtubeId) return false;
+            event.preventDefault();
+            seekRef.current?.(youtubeId, seconds);
+            return true;
+          },
         },
       },
       onCreate: ({ editor: ed }) => {
@@ -225,7 +257,7 @@ export function NoteEditor({ note, allTags, onTitle, onContent, onPin, onDelete,
         <span className="note-stamp">edited {relativeTime(note.updated_at)}</span>
       </div>
 
-      <Toolbar editor={editor} />
+      <Toolbar editor={editor} getTimestampContext={getTimestampContext} />
 
       <div className="editor-scroll" onClick={() => editor?.commands.focus()}>
         <EditorContent editor={editor} />
@@ -234,7 +266,13 @@ export function NoteEditor({ note, allTags, onTitle, onContent, onPin, onDelete,
   );
 }
 
-function Toolbar({ editor }: { editor: Editor | null }) {
+function Toolbar({
+  editor,
+  getTimestampContext,
+}: {
+  editor: Editor | null;
+  getTimestampContext?: () => { youtubeId: string; seconds: number } | null;
+}) {
   if (!editor) return <div className="toolbar" />;
   const size = (editor.getAttributes("textStyle").fontSize as string | null) ?? "";
   const btn = (
@@ -292,6 +330,18 @@ function Toolbar({ editor }: { editor: Editor | null }) {
       {btn("Bullet list", editor.isActive("bulletList"), () => editor.chain().focus().toggleBulletList().run(), <List size={16} />)}
       {btn("Numbered list", editor.isActive("orderedList"), () => editor.chain().focus().toggleOrderedList().run(), <ListOrdered size={16} />)}
       {btn("Checklist", editor.isActive("taskList"), () => editor.chain().focus().toggleTaskList().run(), <ListChecks size={16} />)}
+      <span className="tb-sep" />
+      {btn(
+        "Insert timestamp",
+        false,
+        () => {
+          const ctx = getTimestampContext?.();
+          if (!ctx) return;
+          editor.chain().focus().insertTimestampChip(ctx).run();
+        },
+        <Timer size={16} />,
+        "Current video time",
+      )}
       <span className="tb-sep" />
       {btn("Undo", false, () => editor.chain().focus().undo().run(), <Undo2 size={16} />, "Ctrl+Z")}
       {btn("Redo", false, () => editor.chain().focus().redo().run(), <Redo2 size={16} />, "Ctrl+Shift+Z")}

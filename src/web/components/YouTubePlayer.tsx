@@ -1,7 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import {
+  forwardRef,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useRef,
   useState,
   type ChangeEvent,
@@ -134,6 +136,12 @@ export type PlayRequest = {
 
 export type PlayerState = "playing" | "paused" | "ended" | "other";
 
+export type YouTubePlayerHandle = {
+  seekTo: (seconds: number) => void;
+  getCurrentTime: () => number;
+  getYoutubeId: () => string | null;
+};
+
 type Props = {
   request: PlayRequest | null;
   onState: (youtubeId: string, state: PlayerState) => void;
@@ -167,7 +175,10 @@ const TICK_MS = 1000;
  * fall back to an Android-Innertube progressive MP4 proxied by our Worker so
  * playback stays inside OwnNote with real seek + progress.
  */
-export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) {
+export const YouTubePlayer = forwardRef<YouTubePlayerHandle, Props>(function YouTubePlayer(
+  { request, onState, onProgress, onTitle },
+  ref,
+) {
   const hostRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<any>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -781,15 +792,15 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
     }
   };
 
-  const seekBy = (delta: number) => {
+  const seekToAbs = useCallback((seconds: number) => {
     const session = sessionRef.current;
-    if (!session || phase === "blocked" || phase === "direct_loading") return;
+    if (!session || phase === "blocked" || phase === "direct_loading" || phase === "idle") return;
+    const target = Math.max(0, seconds);
     if (modeRef.current === "direct") {
       const v = videoRef.current;
       if (!v) return;
       const dur = Number(v.duration) || session.dur;
-      let next = Math.max(0, dur ? Math.min((v.currentTime || 0) + delta, Math.max(0, dur - 0.25)) : (v.currentTime || 0) + delta);
-      // SABR only has a live buffered prefix — don't seek into empty media.
+      let next = dur ? Math.min(target, Math.max(0, dur - 0.25)) : target;
       if (sabrRef.current) next = clampSabrSeek(v, next);
       v.currentTime = next;
       session.pos = next;
@@ -802,9 +813,8 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
     const p = playerRef.current;
     if (!p) return;
     try {
-      const cur = Number(p.getCurrentTime()) || session.pos;
       const dur = Number(p.getDuration()) || session.dur;
-      const next = Math.max(0, dur ? Math.min(cur + delta, Math.max(0, dur - 0.25)) : cur + delta);
+      const next = dur ? Math.min(target, Math.max(0, dur - 0.25)) : target;
       p.seekTo(next, true);
       session.pos = next;
       session.dur = dur;
@@ -814,6 +824,43 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
     } catch {
       /* ignore */
     }
+  }, [phase]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      seekTo: seekToAbs,
+      getCurrentTime: () => {
+        const session = sessionRef.current;
+        if (!session) return 0;
+        if (modeRef.current === "direct") {
+          return Number(videoRef.current?.currentTime) || session.pos;
+        }
+        try {
+          return Number(playerRef.current?.getCurrentTime()) || session.pos;
+        } catch {
+          return session.pos;
+        }
+      },
+      getYoutubeId: () => sessionRef.current?.youtubeId ?? null,
+    }),
+    [seekToAbs],
+  );
+
+  const seekBy = (delta: number) => {
+    const session = sessionRef.current;
+    if (!session) return;
+    const cur =
+      modeRef.current === "direct"
+        ? Number(videoRef.current?.currentTime) || session.pos
+        : (() => {
+            try {
+              return Number(playerRef.current?.getCurrentTime()) || session.pos;
+            } catch {
+              return session.pos;
+            }
+          })();
+    seekToAbs(cur + delta);
   };
 
   const onScrubInput = (e: ChangeEvent<HTMLInputElement>) => {
@@ -1270,4 +1317,4 @@ export function YouTubePlayer({ request, onState, onProgress, onTitle }: Props) 
       </div>
     </div>
   );
-}
+});

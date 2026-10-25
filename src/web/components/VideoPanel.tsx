@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type FormEvent,
+} from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import {
   closestCenter,
@@ -17,16 +27,30 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Check, GripVertical, ListVideo, Plus, SkipBack, SkipForward, Trash2 } from "lucide-react";
+import { Check, GripVertical, ListVideo, Plus, Search, SkipBack, SkipForward, Trash2 } from "lucide-react";
 import type { NoteVideo, VideoStatus } from "@shared/types";
-import { extractYoutubeId } from "@shared/youtube";
+import { extractYoutubeId, youtubeWatchUrl } from "@shared/youtube";
 import { api } from "../api";
-import { YouTubePlayer, type PlayerState, type PlayRequest } from "./YouTubePlayer";
+import {
+  YouTubePlayer,
+  type PlayerState,
+  type PlayRequest,
+  type YouTubePlayerHandle,
+} from "./YouTubePlayer";
+import { YoutubeSearchModal, type YtSearchResult } from "./YoutubeSearchModal";
 
 type Props = {
   noteId: string | null;
   preferredVideoId: string | null;
   onVideoSelected: (videoId: string) => void;
+};
+
+export type VideoPanelHandle = {
+  seekTo: (seconds: number) => void;
+  getCurrentTime: () => number;
+  getYoutubeId: () => string | null;
+  /** Soft-seek if already on this video; otherwise load then seek via PlayRequest. */
+  jumpTo: (youtubeId: string, seconds: number) => void;
 };
 
 type Prog = { pos: number; dur: number };
@@ -41,7 +65,10 @@ function pctOf(v: NoteVideo, prog: Record<string, Prog>): number {
   return dur > 0 ? Math.min(100, Math.round((pos / dur) * 100)) : 0;
 }
 
-export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props) {
+export const VideoPanel = forwardRef<VideoPanelHandle, Props>(function VideoPanel(
+  { noteId, preferredVideoId, onVideoSelected },
+  ref,
+) {
   const [videos, setVideos] = useState<NoteVideo[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -49,9 +76,11 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
   const [prog, setProg] = useState<Record<string, Prog>>({});
   const [url, setUrl] = useState("");
   const [adding, setAdding] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [autoplay, setAutoplay] = useState(() => localStorage.getItem(AUTOPLAY_KEY) !== "off");
 
+  const playerRef = useRef<YouTubePlayerHandle | null>(null);
   const videosRef = useRef(videos);
   videosRef.current = videos;
   const selectedRef = useRef(selectedId);
@@ -78,17 +107,36 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
   );
 
   const play = useCallback(
-    (v: NoteVideo, autoStart: boolean) => {
+    (v: NoteVideo, autoStart: boolean, atSeconds?: number) => {
       setSelectedId(v.id);
       setRequest({
         youtubeId: v.youtube_id,
-        startSeconds: startSecondsFor(v),
+        startSeconds: atSeconds !== undefined ? Math.max(0, atSeconds) : startSecondsFor(v),
         play: autoStart,
         nonce: ++nonce.current,
       });
       onVideoSelected(v.id);
     },
     [onVideoSelected, startSecondsFor],
+  );
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      seekTo: (seconds) => playerRef.current?.seekTo(seconds),
+      getCurrentTime: () => playerRef.current?.getCurrentTime() ?? 0,
+      getYoutubeId: () => playerRef.current?.getYoutubeId() ?? null,
+      jumpTo: (youtubeId, seconds) => {
+        const current = playerRef.current?.getYoutubeId();
+        if (current === youtubeId) {
+          playerRef.current?.seekTo(seconds);
+          return;
+        }
+        const v = videosRef.current.find((x) => x.youtube_id === youtubeId);
+        if (v) play(v, true, seconds);
+      },
+    }),
+    [play],
   );
 
   // Load videos when the note changes.
@@ -237,6 +285,11 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
     }
   }
 
+  function pickSearch(hit: YtSearchResult) {
+    setSearchOpen(false);
+    void addUrl(youtubeWatchUrl(hit.youtubeId));
+  }
+
   async function remove(v: NoteVideo) {
     const wasSelected = v.id === selectedRef.current;
     const prev = videosRef.current;
@@ -321,7 +374,13 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
         </label>
       </header>
 
-      <YouTubePlayer request={request} onState={onState} onProgress={onProgress} onTitle={onTitle} />
+      <YouTubePlayer
+        ref={playerRef}
+        request={request}
+        onState={onState}
+        onProgress={onProgress}
+        onTitle={onTitle}
+      />
 
       <div className="now">
         <div className="now-text">
@@ -370,6 +429,16 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
           aria-label="YouTube URL"
           disabled={!noteId || adding}
         />
+        <button
+          type="button"
+          className="icon-btn"
+          disabled={!noteId || adding}
+          aria-label="Search YouTube"
+          title="Search YouTube"
+          onClick={() => setSearchOpen(true)}
+        >
+          <Search size={18} />
+        </button>
         <button type="submit" className="icon-btn solid" disabled={!url.trim() || adding} aria-label="Add video">
           <Plus size={18} />
         </button>
@@ -377,6 +446,9 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
       <p className="inline-error" role="alert">
         {error}
       </p>
+      {searchOpen && (
+        <YoutubeSearchModal onPick={pickSearch} onClose={() => setSearchOpen(false)} />
+      )}
 
       <div className="video-scroll" aria-busy={loading}>
         {videos.length === 0 && !loading && (
@@ -411,7 +483,7 @@ export function VideoPanel({ noteId, preferredVideoId, onVideoSelected }: Props)
       </footer>
     </div>
   );
-}
+});
 
 function VideoRow(props: {
   video: NoteVideo;
