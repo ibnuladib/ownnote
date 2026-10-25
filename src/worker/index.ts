@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { HttpError, type AppEnv } from "./env";
 import { auth, originCheck, requireAuth } from "./routes/auth";
+import { attachments } from "./routes/attachments";
 import { misc } from "./routes/misc";
 import { notes } from "./routes/notes";
 import { videos } from "./routes/videos";
@@ -30,6 +31,7 @@ api.get("/health", async (c) => {
 api.route("/", auth);
 api.route("/", notes);
 api.route("/", videos);
+api.route("/", attachments);
 api.route("/", misc);
 
 app.route("/api", api);

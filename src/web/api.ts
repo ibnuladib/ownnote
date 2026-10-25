@@ -149,6 +149,33 @@ export const api = {
 
   endSabr: (youtubeId: string, sessionId: string) =>
     req<void>("DELETE", `/api/media/youtube/${youtubeId}/sabr/${sessionId}`),
+
+  uploadAttachment: async (noteId: string, file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    const res = await fetch(`/api/notes/${noteId}/attachments`, {
+      method: "POST",
+      credentials: "include",
+      body,
+    });
+    if (res.status === 401) unauthorizedHandler?.();
+    if (!res.ok) {
+      let msg = res.statusText || `Upload failed (${res.status})`;
+      try {
+        const data = (await res.json()) as { error?: string };
+        if (data.error) msg = data.error;
+      } catch {
+        /* non-JSON */
+      }
+      throw new ApiError(res.status, msg);
+    }
+    return (await res.json()) as {
+      id: string;
+      url: string;
+      content_type: string;
+      byte_size: number;
+    };
+  },
 };
 
 export const exportUrl = (format: "json" | "markdown") => `/api/export?format=${format}`;

@@ -1,6 +1,8 @@
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
+  /** Image (and later PDF) object storage */
+  ATTACHMENTS: R2Bucket;
   /** pbkdf2-sha256:<iterations>:<salt b64url>:<hash b64url> (see scripts/hash-password.mjs) */
   PASSWORD_HASH?: string;
 }

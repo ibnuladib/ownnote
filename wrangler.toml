@@ -20,6 +20,10 @@ database_name = "ownnote-db"
 database_id = "6d04ec91-f130-4d7a-8510-36dc0ea13c6b"
 migrations_dir = "migrations"
 
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "ownnote-attachments"
+
 [observability]
 enabled = true
 

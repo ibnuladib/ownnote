@@ -1147,6 +1147,14 @@ body.is-resizing iframe {
   padding: 22px 28px 120px;
 }
 
+.prose img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.75rem 0;
+  border-radius: 6px;
+}
+
 .prose {
   outline: none;
   min-height: 50vh;

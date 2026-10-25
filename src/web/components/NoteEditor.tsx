@@ -3,6 +3,7 @@ import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import TextStyle from "@tiptap/extension-text-style";
 import Highlight from "@tiptap/extension-highlight";
+import Image from "@tiptap/extension-image";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -21,8 +22,19 @@ import {
   X,
 } from "lucide-react";
 import type { Note, TipTapJSON } from "@shared/types";
+import { api } from "../api";
 import { FONT_SIZES, FontSize } from "./fontSize";
 import { relativeTime } from "../lib/time";
+
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+
+async function insertImageFiles(editor: Editor, noteId: string, files: File[]) {
+  const images = files.filter((f) => IMAGE_TYPES.has(f.type));
+  for (const file of images) {
+    const { url } = await api.uploadAttachment(noteId, file);
+    editor.chain().focus().setImage({ src: url, alt: file.name || "image" }).run();
+  }
+}
 
 type Props = {
   note: Note;
@@ -56,7 +68,10 @@ export function NoteEditor({ note, allTags, onTitle, onContent, onPin, onDelete,
   const [confirming, setConfirming] = useState(false);
   const [tagDraft, setTagDraft] = useState("");
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const editorRef = useRef<Editor | null>(null);
   const noteId = note.id;
+  const noteIdRef = useRef(noteId);
+  noteIdRef.current = noteId;
 
   const editor = useEditor(
     {
@@ -64,6 +79,7 @@ export function NoteEditor({ note, allTags, onTitle, onContent, onPin, onDelete,
         StarterKit,
         TextStyle,
         FontSize,
+        Image.configure({ inline: false, allowBase64: false }),
         Highlight.extend({
           addKeyboardShortcuts() {
             return {
@@ -76,8 +92,32 @@ export function NoteEditor({ note, allTags, onTitle, onContent, onPin, onDelete,
         Placeholder.configure({ placeholder: "Start writing. Tick things off as you learn them." }),
       ],
       content: isDoc(note.content) ? (cleanNode(note.content) as TipTapJSON) : "",
-      editorProps: { attributes: { class: "prose", spellcheck: "true" } },
-      onUpdate: ({ editor }) => onContent(noteId, editor.getJSON() as TipTapJSON),
+      editorProps: {
+        attributes: { class: "prose", spellcheck: "true" },
+        handlePaste(_view, event) {
+          const files = Array.from(event.clipboardData?.files ?? []);
+          if (!files.some((f) => IMAGE_TYPES.has(f.type))) return false;
+          event.preventDefault();
+          const ed = editorRef.current;
+          if (ed) void insertImageFiles(ed, noteIdRef.current, files).catch(() => undefined);
+          return true;
+        },
+        handleDrop(_view, event) {
+          const files = Array.from(event.dataTransfer?.files ?? []);
+          if (!files.some((f) => IMAGE_TYPES.has(f.type))) return false;
+          event.preventDefault();
+          const ed = editorRef.current;
+          if (ed) void insertImageFiles(ed, noteIdRef.current, files).catch(() => undefined);
+          return true;
+        },
+      },
+      onCreate: ({ editor: ed }) => {
+        editorRef.current = ed;
+      },
+      onUpdate: ({ editor: ed }) => {
+        editorRef.current = ed;
+        onContent(noteIdRef.current, ed.getJSON() as TipTapJSON);
+      },
     },
     [noteId],
   );
