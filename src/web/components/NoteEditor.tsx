@@ -3,7 +3,6 @@ import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import TextStyle from "@tiptap/extension-text-style";
 import Highlight from "@tiptap/extension-highlight";
-import Image from "@tiptap/extension-image";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -25,6 +24,7 @@ import {
 } from "lucide-react";
 import type { Note, TipTapJSON } from "@shared/types";
 import { api, ApiError } from "../api";
+import { insertEditorImage, ResizableImage } from "../extensions/resizableImage";
 import { TimestampChip } from "../extensions/timestampChip";
 import { FONT_SIZES, FontSize } from "./fontSize";
 import { relativeTime } from "../lib/time";
@@ -59,14 +59,7 @@ async function insertImageFiles(
   for (const file of images) {
     try {
       const { url } = await api.uploadAttachment(noteId, file);
-      const ok = editor
-        .chain()
-        .focus()
-        .insertContent({
-          type: "image",
-          attrs: { src: url, alt: file.name || "image" },
-        })
-        .run();
+      const ok = insertEditorImage(editor, url, file.name || "image");
       if (!ok) onError?.("Couldn't insert the image into the note.");
     } catch (e) {
       const msg =
@@ -139,7 +132,7 @@ export function NoteEditor({
         StarterKit,
         TextStyle,
         FontSize,
-        Image.configure({ inline: false, allowBase64: false }),
+        ResizableImage.configure({ inline: false, allowBase64: false }),
         TimestampChip,
         Highlight.extend({
           addKeyboardShortcuts() {

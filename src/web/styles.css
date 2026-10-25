@@ -1255,6 +1255,58 @@ body.is-resizing iframe {
   border-radius: 6px;
 }
 
+.editor-image {
+  position: relative;
+  display: block;
+  max-width: 100%;
+  margin: 0.75rem 0;
+  width: fit-content;
+  line-height: 0;
+  border-radius: 6px;
+  cursor: grab;
+}
+
+.editor-image:active {
+  cursor: grabbing;
+}
+
+.editor-image img {
+  margin: 0;
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.editor-image.is-selected,
+.editor-image.is-resizing {
+  outline: 2px solid var(--accent, #6c8cff);
+  outline-offset: 2px;
+}
+
+.editor-image-handle {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 2px solid var(--bg, #fff);
+  background: var(--accent, #6c8cff);
+  cursor: nwse-resize;
+  opacity: 0;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.editor-image.is-selected .editor-image-handle,
+.editor-image:hover .editor-image-handle,
+.editor-image.is-resizing .editor-image-handle {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .timestamp-chip {
   display: inline-flex;
   align-items: center;
