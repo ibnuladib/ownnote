@@ -75,7 +75,7 @@ Empty `q` → `400`. Innertube fetch failure → `502`. Soft parse / no hits →
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
-| POST | `/api/notes/:id/attachments` | multipart `file` (JPEG/PNG/GIF/WebP, ≤5MB) | `{ "id", "url", "content_type", "byte_size" }` |
+| POST | `/api/notes/:id/attachments` | multipart `file` (JPEG/PNG/GIF/WebP, ≤900KB; stored in D1) | `{ "id", "url", "content_type", "byte_size" }` |
 | GET | `/api/attachments/:id` | — | binary stream |
 | DELETE | `/api/attachments/:id` | — | `204` |
 

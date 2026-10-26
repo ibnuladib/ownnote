@@ -5,7 +5,8 @@ import { getNoteRow } from "../lib/notes-db";
 
 export const attachments = new Hono<AppEnv>();
 
-const MAX_BYTES = 5 * 1024 * 1024;
+// ponytail: D1 row limit ~1MB — raise / move to R2 when ToS can be accepted.
+const MAX_BYTES = 900 * 1024;
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 
 type AttachmentRow = {
@@ -15,6 +16,7 @@ type AttachmentRow = {
   content_type: string;
   byte_size: number;
   created_at: string;
+  data: ArrayBuffer | null;
 };
 
 attachments.post("/notes/:id/attachments", async (c) => {
@@ -28,10 +30,14 @@ attachments.post("/notes/:id/attachments", async (c) => {
     throw new HttpError(400, "Expected multipart form data");
   }
 
-  const file = form.get("file");
-  if (!(file instanceof File)) throw new HttpError(400, "file is required");
+  // Workers FormData typings omit File; runtime still returns File for multipart parts.
+  const entry = form.get("file") as unknown;
+  if (entry == null || typeof entry === "string") throw new HttpError(400, "file is required");
+  const file = entry as { size: number; type: string; arrayBuffer(): Promise<ArrayBuffer> };
   if (file.size <= 0) throw new HttpError(400, "Empty file");
-  if (file.size > MAX_BYTES) throw new HttpError(413, "Image too large (max 5MB)");
+  if (file.size > MAX_BYTES) {
+    throw new HttpError(413, "Image too large (max 900KB without object storage)");
+  }
 
   const contentType = (file.type || "").toLowerCase();
   if (!ALLOWED.has(contentType)) {
@@ -39,26 +45,20 @@ attachments.post("/notes/:id/attachments", async (c) => {
   }
 
   const id = crypto.randomUUID();
-  const r2Key = `images/${noteId}/${id}`;
+  // Keep unique key column from 0002; value is not an R2 object path anymore.
+  const storageKey = `d1/${noteId}/${id}`;
   const bytes = new Uint8Array(await file.arrayBuffer());
-  if (bytes.byteLength > MAX_BYTES) throw new HttpError(413, "Image too large (max 5MB)");
-
-  await c.env.ATTACHMENTS.put(r2Key, bytes, {
-    httpMetadata: { contentType },
-  });
+  if (bytes.byteLength > MAX_BYTES) {
+    throw new HttpError(413, "Image too large (max 900KB without object storage)");
+  }
 
   const created_at = nowIso();
-  try {
-    await c.env.DB.prepare(
-      `INSERT INTO note_attachments (id, note_id, r2_key, content_type, byte_size, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-      .bind(id, noteId, r2Key, contentType, bytes.byteLength, created_at)
-      .run();
-  } catch (err) {
-    await c.env.ATTACHMENTS.delete(r2Key).catch(() => undefined);
-    throw err;
-  }
+  await c.env.DB.prepare(
+    `INSERT INTO note_attachments (id, note_id, r2_key, content_type, byte_size, created_at, data)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(id, noteId, storageKey, contentType, bytes.byteLength, created_at, bytes)
+    .run();
 
   return c.json({
     id,
@@ -71,32 +71,27 @@ attachments.post("/notes/:id/attachments", async (c) => {
 attachments.get("/attachments/:id", async (c) => {
   const id = c.req.param("id");
   const row = await c.env.DB.prepare(
-    `SELECT id, note_id, r2_key, content_type, byte_size, created_at FROM note_attachments WHERE id = ?`,
+    `SELECT id, note_id, r2_key, content_type, byte_size, created_at, data FROM note_attachments WHERE id = ?`,
   )
     .bind(id)
     .first<AttachmentRow>();
   if (!row) throw new HttpError(404, "Attachment not found");
-
-  const obj = await c.env.ATTACHMENTS.get(row.r2_key);
-  if (!obj) throw new HttpError(404, "Attachment file missing");
+  if (!row.data || row.data.byteLength === 0) throw new HttpError(404, "Attachment file missing");
 
   const headers = new Headers();
   headers.set("Content-Type", row.content_type);
   headers.set("Content-Length", String(row.byte_size));
   headers.set("Cache-Control", "private, max-age=3600");
-  return new Response(obj.body, { status: 200, headers });
+  return new Response(row.data, { status: 200, headers });
 });
 
 attachments.delete("/attachments/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare(
-    `SELECT id, r2_key FROM note_attachments WHERE id = ?`,
-  )
+  const row = await c.env.DB.prepare(`SELECT id FROM note_attachments WHERE id = ?`)
     .bind(id)
-    .first<{ id: string; r2_key: string }>();
+    .first<{ id: string }>();
   if (!row) throw new HttpError(404, "Attachment not found");
 
   await c.env.DB.prepare(`DELETE FROM note_attachments WHERE id = ?`).bind(id).run();
-  await c.env.ATTACHMENTS.delete(row.r2_key).catch(() => undefined);
   return c.body(null, 204);
 });
