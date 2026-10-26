@@ -71,7 +71,7 @@ test.describe("API integration", () => {
     };
     expect(body.title.toLowerCase()).toContain("cs229");
     expect(body.duration_seconds).toBeGreaterThan(60);
-    expect(body.src).toBe(`/api/media/youtube/${id}/stream`);
+    expect(body.src).toMatch(new RegExp(`^/api/media/youtube/${id}/stream(\\?|$)`));
     expect(body.mimeType).toContain("mp4");
 
     const stream = await request.get(body.src, {

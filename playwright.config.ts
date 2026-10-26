@@ -16,8 +16,13 @@ async function resolvePort(preferred: number): Promise<number> {
   throw new Error(`No free port near ${preferred}`);
 }
 
-const preferred = Number(process.env.E2E_PORT ?? 8799);
-const PORT = process.env.E2E_BASE_URL ? preferred : await resolvePort(preferred);
+// Workers re-import this config after webServer binds the port. If we walk for a
+// free port again, they pick preferred+1 and baseURL diverges from the server.
+const fromEnv = process.env.E2E_PORT;
+const preferred = Number(fromEnv ?? 8799);
+const PORT = process.env.E2E_BASE_URL || fromEnv
+  ? preferred
+  : await resolvePort(preferred);
 process.env.E2E_PORT = String(PORT);
 const BASE_URL = process.env.E2E_BASE_URL ?? `http://127.0.0.1:${PORT}`;
 

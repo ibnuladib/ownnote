@@ -113,7 +113,7 @@ test.describe("workspace", () => {
     await page.reload();
     await expect(page.locator(".note-row")).toHaveCount(2);
 
-    await page.getByRole("button", { name: "Search notes" }).click();
+    await page.getByRole("button", { name: "Search (Ctrl+K)" }).click();
     const input = page.getByRole("dialog", { name: "Search notes" }).getByLabel("Search");
     await expect(input).toBeFocused();
 
@@ -297,7 +297,7 @@ test.describe("workspace", () => {
     await page.getByRole("button", { name: "Export", exact: true }).click();
     const [download] = await Promise.all([
       page.waitForEvent("download"),
-      page.getByRole("menuitem", { name: /JSON/ }).click(),
+      page.getByRole("menuitem", { name: /^JSON\b/ }).click(),
     ]);
     expect(download.suggestedFilename()).toMatch(/^ownnote-export-.*\.json$/);
   });
