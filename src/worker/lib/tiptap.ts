@@ -28,6 +28,14 @@ export function extractText(doc: unknown): string {
   const walk = (n: Node, depth: number) => {
     if (depth > 100 || !n || typeof n !== "object") return;
     if (typeof n.text === "string") out.push(n.text);
+    if (n.type === "timestampChip" && typeof n.attrs?.label === "string") {
+      out.push(` ${n.attrs.label} `);
+    } else if (n.type === "pdfAnchor") {
+      if (typeof n.attrs?.label === "string") out.push(` ${n.attrs.label} `);
+      if (typeof n.attrs?.quote === "string" && n.attrs.quote) out.push(` ${n.attrs.quote} `);
+    } else if (n.type === "image" && typeof n.attrs?.alt === "string" && n.attrs.alt) {
+      out.push(` ${n.attrs.alt} `);
+    }
     if (Array.isArray(n.content)) for (const c of n.content) walk(c, depth + 1);
     if (n.type && BLOCK_TYPES.has(n.type)) out.push("\n");
     else if (n.type === "hardBreak") out.push("\n");
@@ -41,6 +49,18 @@ function renderInline(nodes: Node[] | undefined): string {
   return nodes
     .map((n) => {
       if (n.type === "hardBreak") return "  \n";
+      if (n.type === "timestampChip") {
+        const ytId = typeof n.attrs?.youtubeId === "string" ? n.attrs.youtubeId : "";
+        const secs = Math.max(0, Math.floor(Number(n.attrs?.seconds) || 0));
+        const label = typeof n.attrs?.label === "string" && n.attrs.label ? n.attrs.label : `${secs}s`;
+        return ytId ? `[⏱ ${label}](https://www.youtube.com/watch?v=${ytId}&t=${secs}s)` : `[⏱ ${label}]`;
+      }
+      if (n.type === "pdfAnchor") {
+        const page = Math.max(1, Math.floor(Number(n.attrs?.page) || 1));
+        const label = typeof n.attrs?.label === "string" && n.attrs.label ? n.attrs.label : `p.${page}`;
+        const quote = typeof n.attrs?.quote === "string" && n.attrs.quote.trim() ? ` "${n.attrs.quote.trim()}"` : "";
+        return `[📄 ${label}${quote}]`;
+      }
       let t = n.text ?? "";
       if (!t) return renderInline(n.content);
       for (const m of n.marks ?? []) {
@@ -49,6 +69,7 @@ function renderInline(nodes: Node[] | undefined): string {
         else if (m.type === "italic") t = `*${t}*`;
         else if (m.type === "strike") t = `~~${t}~~`;
         else if (m.type === "highlight") t = `==${t}==`;
+        else if (m.type === "cloze") t = `{{${t}}}`;
         else if (m.type === "link" && typeof m.attrs?.href === "string") t = `[${t}](${m.attrs.href})`;
       }
       return t;
@@ -82,6 +103,11 @@ function renderBlock(n: Node, depth = 0): string {
       return "```" + String(n.attrs?.language ?? "") + "\n" + kids.map((k) => k.text ?? "").join("") + "\n```";
     case "horizontalRule":
       return "---";
+    case "image": {
+      const src = typeof n.attrs?.src === "string" ? n.attrs.src : "";
+      const alt = typeof n.attrs?.alt === "string" ? n.attrs.alt : "image";
+      return src ? `![${alt}](${src})` : "";
+    }
     case "bulletList":
       return kids.map((li) => "- " + indent(renderBlocks(li.content ?? [], depth + 1, "\n"), "  ")).join("\n");
     case "orderedList": {

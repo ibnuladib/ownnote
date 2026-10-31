@@ -54,6 +54,11 @@ export function setThemePref(next: ThemePref) {
   emit();
 }
 
+export function toggleTheme() {
+  const cur = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  setThemePref(cur === "dark" ? "light" : "dark");
+}
+
 export function useThemePref(): ThemePref {
   return useSyncExternalStore(
     (cb) => {

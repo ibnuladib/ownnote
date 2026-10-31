@@ -1,7 +1,9 @@
 import type {
   Note,
+  NotePdf,
   NoteSummary,
   NoteVideo,
+  PdfStatus,
   TemplateMeta,
   TipTapJSON,
   UserPrefs,
@@ -182,6 +184,40 @@ export const api = {
       byte_size: number;
     };
   },
+
+  // PDFs (Phase A)
+  listPdfs: (noteId: string) =>
+    req<{ pdfs: NotePdf[] }>("GET", `/api/notes/${noteId}/pdfs`).then((r) => r.pdfs),
+  uploadPdf: async (noteId: string, file: File, opts?: { title?: string; pageCount?: number }) => {
+    const body = new FormData();
+    body.append("file", file);
+    if (opts?.title) body.append("title", opts.title);
+    if (opts?.pageCount) body.append("page_count", String(opts.pageCount));
+    const res = await fetch(`/api/notes/${noteId}/pdfs`, {
+      method: "POST",
+      credentials: "include",
+      body,
+    });
+    if (res.status === 401) unauthorizedHandler?.();
+    if (!res.ok) {
+      let msg = res.statusText || `PDF upload failed (${res.status})`;
+      try {
+        const data = (await res.json()) as { error?: string };
+        if (data.error) msg = data.error;
+      } catch {
+        /* non-JSON */
+      }
+      throw new ApiError(res.status, msg);
+    }
+    const data = (await res.json()) as { pdf: NotePdf };
+    return data.pdf;
+  },
+  patchPdf: (
+    id: string,
+    patch: { title?: string; status?: PdfStatus; current_page?: number; page_count?: number },
+  ) => req<{ pdf: NotePdf }>("PATCH", `/api/pdfs/${id}`, patch).then((r) => r.pdf),
+  deletePdf: (id: string) => req<void>("DELETE", `/api/pdfs/${id}`),
 };
 
+export const pdfFileUrl = (id: string) => `/api/pdfs/${id}/file`;
 export const exportUrl = (format: "json" | "markdown") => `/api/export?format=${format}`;

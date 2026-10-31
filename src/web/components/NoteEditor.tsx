@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import TextStyle from "@tiptap/extension-text-style";
@@ -8,6 +16,12 @@ import TaskItem from "@tiptap/extension-task-item";
 import Placeholder from "@tiptap/extension-placeholder";
 import {
   Bold,
+  Brain,
+  Code2,
+  Eye,
+  EyeOff,
+  FileText,
+  Heading1,
   Heading2,
   Highlighter,
   ImageIcon,
@@ -15,7 +29,11 @@ import {
   List,
   ListChecks,
   ListOrdered,
+  ListTree,
+  Minus,
+  Quote,
   Redo2,
+  Sparkles,
   Star,
   Timer,
   Trash2,
@@ -24,10 +42,14 @@ import {
 } from "lucide-react";
 import type { Note, TipTapJSON } from "@shared/types";
 import { api, ApiError } from "../api";
+import { ClozeMark } from "../extensions/clozeMark";
+import { PdfAnchor } from "../extensions/pdfAnchor";
 import { insertEditorImage, ResizableImage } from "../extensions/resizableImage";
 import { TimestampChip } from "../extensions/timestampChip";
-import { FONT_SIZES, FontSize } from "./fontSize";
+import { prepareImageForUpload } from "../lib/imageCompress";
 import { relativeTime } from "../lib/time";
+import { FONT_SIZES, FontSize } from "./fontSize";
+import { extractStudyCards, StudyModal } from "./StudyModal";
 
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 
@@ -56,10 +78,11 @@ async function insertImageFiles(
 ) {
   const images = files.filter(isImageFile);
   if (!images.length) return;
-  for (const file of images) {
+  for (const rawFile of images) {
     try {
+      const file = await prepareImageForUpload(rawFile);
       const { url } = await api.uploadAttachment(noteId, file);
-      const ok = insertEditorImage(editor, url, file.name || "image");
+      const ok = insertEditorImage(editor, url, rawFile.name || "image");
       if (!ok) onError?.("Couldn't insert the image into the note.");
     } catch (e) {
       const msg =
@@ -68,6 +91,17 @@ async function insertImageFiles(
     }
   }
 }
+
+export type NoteEditorHandle = {
+  insertPdfCitation: (attrs: {
+    pdfId: string;
+    page: number;
+    label?: string;
+    quote?: string;
+  }) => void;
+  toggleRecallMode: () => void;
+  openStudyModal: () => void;
+};
 
 type Props = {
   note: Note;
@@ -80,6 +114,9 @@ type Props = {
   /** Active YouTube id + live clock from the watch pane (may be null). */
   getTimestampContext?: () => { youtubeId: string; seconds: number } | null;
   onSeekTimestamp?: (youtubeId: string, seconds: number) => void;
+  /** Active PDF id + page from the PDF pane (may be null). */
+  getPdfContext?: () => { pdfId: string; title: string; page: number } | null;
+  onSeekPdf?: (pdfId: string, page: number) => void;
   onNotify?: (msg: string) => void;
 };
 
@@ -100,31 +137,128 @@ function cleanNode(node: unknown): unknown {
   };
 }
 
-export function NoteEditor({
-  note,
-  allTags,
-  onTitle,
-  onContent,
-  onPin,
-  onDelete,
-  onTags,
-  getTimestampContext,
-  onSeekTimestamp,
-  onNotify,
-}: Props) {
+type DocStats = {
+  words: number;
+  readMin: number;
+  tasksDone: number;
+  tasksTotal: number;
+  timestamps: number;
+  pdfRefs: number;
+  headings: Array<{ level: number; text: string; index: number }>;
+};
+
+function computeDocStats(doc: TipTapJSON): DocStats {
+  let textAcc = "";
+  let tasksDone = 0;
+  let tasksTotal = 0;
+  let timestamps = 0;
+  let pdfRefs = 0;
+  let headingIdx = 0;
+  const headings: Array<{ level: number; text: string; index: number }> = [];
+
+  type N = {
+    type?: string;
+    text?: string;
+    attrs?: Record<string, unknown>;
+    content?: N[];
+  };
+
+  const inlineText = (nodes: N[] | undefined): string =>
+    (nodes ?? [])
+      .map((n) => (typeof n.text === "string" ? n.text : inlineText(n.content)))
+      .join("");
+
+  const walk = (n: N) => {
+    if (!n || typeof n !== "object") return;
+    if (typeof n.text === "string") textAcc += " " + n.text;
+    if (n.type === "taskItem") {
+      tasksTotal++;
+      if (n.attrs?.checked) tasksDone++;
+    } else if (n.type === "timestampChip") {
+      timestamps++;
+    } else if (n.type === "pdfAnchor") {
+      pdfRefs++;
+    } else if (n.type === "heading") {
+      const hText = inlineText(n.content).trim();
+      const idx = headingIdx++;
+      if (hText) {
+        headings.push({
+          level: Math.min(3, Math.max(1, Number(n.attrs?.level) || 2)),
+          text: hText,
+          index: idx,
+        });
+      }
+    }
+    if (Array.isArray(n.content)) {
+      for (const c of n.content) walk(c);
+    }
+  };
+
+  walk(doc as N);
+  const words = textAcc.trim() ? textAcc.trim().split(/\s+/).length : 0;
+  const readMin = Math.max(1, Math.ceil(words / 200));
+  return { words, readMin, tasksDone, tasksTotal, timestamps, pdfRefs, headings };
+}
+
+type SlashItem = {
+  key: string;
+  label: string;
+  hint: string;
+  icon: React.ReactNode;
+  run: (editor: Editor) => void;
+};
+
+export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEditor(
+  {
+    note,
+    allTags,
+    onTitle,
+    onContent,
+    onPin,
+    onDelete,
+    onTags,
+    getTimestampContext,
+    onSeekTimestamp,
+    getPdfContext,
+    onSeekPdf,
+    onNotify,
+  },
+  ref,
+) {
   const [title, setTitle] = useState(note.title);
   const [confirming, setConfirming] = useState(false);
   const [tagDraft, setTagDraft] = useState("");
+  const [recallMode, setRecallMode] = useState(false);
+  const [studyOpen, setStudyOpen] = useState(false);
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const [liveDoc, setLiveDoc] = useState<TipTapJSON>(() =>
+    isDoc(note.content) ? (cleanNode(note.content) as TipTapJSON) : { type: "doc", content: [] },
+  );
+
+  // Slash command menu state
+  const [slashState, setSlashState] = useState<{
+    open: boolean;
+    query: string;
+    from: number;
+    to: number;
+    selIndex: number;
+  } | null>(null);
+
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<Editor | null>(null);
   const noteId = note.id;
   const noteIdRef = useRef(noteId);
   noteIdRef.current = noteId;
   const seekRef = useRef(onSeekTimestamp);
   seekRef.current = onSeekTimestamp;
+  const seekPdfRef = useRef(onSeekPdf);
+  seekPdfRef.current = onSeekPdf;
   const notifyRef = useRef(onNotify);
   notifyRef.current = onNotify;
+  const recallRef = useRef(recallMode);
+  recallRef.current = recallMode;
 
   const editor = useEditor(
     {
@@ -134,6 +268,8 @@ export function NoteEditor({
         FontSize,
         ResizableImage.configure({ inline: false, allowBase64: false }),
         TimestampChip,
+        PdfAnchor,
+        ClozeMark,
         Highlight.extend({
           addKeyboardShortcuts() {
             return {
@@ -143,7 +279,9 @@ export function NoteEditor({
         }).configure({ multicolor: false }),
         TaskList,
         TaskItem.configure({ nested: true }),
-        Placeholder.configure({ placeholder: "Start writing. Tick things off as you learn them." }),
+        Placeholder.configure({
+          placeholder: "Start writing, type / for commands, or wrap {{terms}} for active recall…",
+        }),
       ],
       content: isDoc(note.content) ? (cleanNode(note.content) as TipTapJSON) : "",
       editorProps: {
@@ -170,16 +308,41 @@ export function NoteEditor({
         },
         handleDOMEvents: {
           click: (_view, event) => {
-            const el = (event.target as HTMLElement | null)?.closest?.(
-              "[data-timestamp-chip]",
-            ) as HTMLElement | null;
-            if (!el) return false;
-            const youtubeId = el.getAttribute("data-youtube-id") || "";
-            const seconds = Number(el.getAttribute("data-seconds") || 0);
-            if (!youtubeId) return false;
-            event.preventDefault();
-            seekRef.current?.(youtubeId, seconds);
-            return true;
+            const target = event.target as HTMLElement | null;
+            if (!target) return false;
+
+            // Active recall click-to-reveal on cloze or highlight spans
+            if (recallRef.current) {
+              const clozeEl = target.closest?.("[data-cloze], mark") as HTMLElement | null;
+              if (clozeEl) {
+                event.preventDefault();
+                const revealed = clozeEl.getAttribute("data-revealed") === "true";
+                clozeEl.setAttribute("data-revealed", revealed ? "false" : "true");
+                return true;
+              }
+            }
+
+            const tsEl = target.closest?.("[data-timestamp-chip]") as HTMLElement | null;
+            if (tsEl) {
+              const youtubeId = tsEl.getAttribute("data-youtube-id") || "";
+              const seconds = Number(tsEl.getAttribute("data-seconds") || 0);
+              if (!youtubeId) return false;
+              event.preventDefault();
+              seekRef.current?.(youtubeId, seconds);
+              return true;
+            }
+
+            const pdfEl = target.closest?.("[data-pdf-anchor]") as HTMLElement | null;
+            if (pdfEl) {
+              const pdfId = pdfEl.getAttribute("data-pdf-id") || "";
+              const page = Math.max(1, Number(pdfEl.getAttribute("data-page") || 1));
+              if (!pdfId) return false;
+              event.preventDefault();
+              seekPdfRef.current?.(pdfId, page);
+              return true;
+            }
+
+            return false;
           },
         },
       },
@@ -188,13 +351,199 @@ export function NoteEditor({
       },
       onUpdate: ({ editor: ed }) => {
         editorRef.current = ed;
-        onContent(noteIdRef.current, ed.getJSON() as TipTapJSON);
+        const json = ed.getJSON() as TipTapJSON;
+        setLiveDoc(json);
+        onContent(noteIdRef.current, json);
+
+        // Detect slash command token `/...` at current cursor in paragraph
+        const { selection } = ed.state;
+        if (!selection.empty) {
+          setSlashState(null);
+          return;
+        }
+        const $from = selection.$from;
+        if ($from.parent.type.name !== "paragraph") {
+          setSlashState(null);
+          return;
+        }
+        const textBefore = $from.parent.textBetween(0, $from.parentOffset, "\n", "\0");
+        const match = textBefore.match(/(?:^|\s)\/([a-zA-Z0-9_-]{0,16})$/);
+        if (match) {
+          const query = match[1]!.toLowerCase();
+          const slashPos = $from.pos - query.length - 1;
+          setSlashState((prev) => ({
+            open: true,
+            query,
+            from: slashPos,
+            to: $from.pos,
+            selIndex: prev?.query === query ? prev.selIndex : 0,
+          }));
+        } else {
+          setSlashState(null);
+        }
       },
     },
     [noteId],
   );
 
+  useImperativeHandle(
+    ref,
+    () => ({
+      insertPdfCitation: (attrs) => {
+        const ed = editorRef.current;
+        if (!ed) return;
+        ed.chain().focus().insertPdfAnchor(attrs).insertContent(" ").run();
+      },
+      toggleRecallMode: () => setRecallMode((r) => !r),
+      openStudyModal: () => setStudyOpen(true),
+    }),
+    [],
+  );
+
+  const slashItems = useMemo<SlashItem[]>(
+    () => [
+      {
+        key: "h1",
+        label: "Heading 1",
+        hint: "/h1",
+        icon: <Heading1 size={15} />,
+        run: (ed) => ed.chain().focus().toggleHeading({ level: 1 }).run(),
+      },
+      {
+        key: "h2",
+        label: "Heading 2",
+        hint: "/h2",
+        icon: <Heading2 size={15} />,
+        run: (ed) => ed.chain().focus().toggleHeading({ level: 2 }).run(),
+      },
+      {
+        key: "todo",
+        label: "Checklist item",
+        hint: "/todo",
+        icon: <ListChecks size={15} />,
+        run: (ed) => ed.chain().focus().toggleTaskList().run(),
+      },
+      {
+        key: "bullet",
+        label: "Bullet list",
+        hint: "/bullet",
+        icon: <List size={15} />,
+        run: (ed) => ed.chain().focus().toggleBulletList().run(),
+      },
+      {
+        key: "numbered",
+        label: "Numbered list",
+        hint: "/num",
+        icon: <ListOrdered size={15} />,
+        run: (ed) => ed.chain().focus().toggleOrderedList().run(),
+      },
+      {
+        key: "cloze",
+        label: "Active recall cloze",
+        hint: "{{term}}",
+        icon: <Brain size={15} />,
+        run: (ed) =>
+          ed
+            .chain()
+            .focus()
+            .insertContent({
+              type: "text",
+              marks: [{ type: "cloze" }],
+              text: "key concept",
+            })
+            .insertContent(" ")
+            .run(),
+      },
+      {
+        key: "code",
+        label: "Code block",
+        hint: "/code",
+        icon: <Code2 size={15} />,
+        run: (ed) => ed.chain().focus().toggleCodeBlock().run(),
+      },
+      {
+        key: "quote",
+        label: "Callout / Blockquote",
+        hint: "/quote",
+        icon: <Quote size={15} />,
+        run: (ed) => ed.chain().focus().toggleBlockquote().run(),
+      },
+      {
+        key: "time",
+        label: "YouTube timestamp",
+        hint: "/time",
+        icon: <Timer size={15} />,
+        run: (ed) => {
+          const ctx = getTimestampContext?.();
+          if (!ctx) {
+            notifyRef.current?.("Select a YouTube video first to insert a timestamp.");
+            return;
+          }
+          ed.chain().focus().insertTimestampChip(ctx).insertContent(" ").run();
+        },
+      },
+      {
+        key: "pdf",
+        label: "Cite active PDF page",
+        hint: "/pdf",
+        icon: <FileText size={15} />,
+        run: (ed) => {
+          const ctx = getPdfContext?.();
+          if (!ctx) {
+            notifyRef.current?.("Open a PDF in the right panel first to cite a page.");
+            return;
+          }
+          const short = ctx.title.length > 20 ? `${ctx.title.slice(0, 19)}…` : ctx.title;
+          ed
+            .chain()
+            .focus()
+            .insertPdfAnchor({
+              pdfId: ctx.pdfId,
+              page: ctx.page,
+              label: `${short} p.${ctx.page}`,
+            })
+            .insertContent(" ")
+            .run();
+        },
+      },
+      {
+        key: "divider",
+        label: "Divider line",
+        hint: "/hr",
+        icon: <Minus size={15} />,
+        run: (ed) => ed.chain().focus().setHorizontalRule().run(),
+      },
+    ],
+    [getPdfContext, getTimestampContext],
+  );
+
+  const filteredSlash = useMemo(() => {
+    if (!slashState?.open) return [];
+    const q = slashState.query;
+    if (!q) return slashItems;
+    return slashItems.filter(
+      (item) =>
+        item.key.includes(q) ||
+        item.label.toLowerCase().includes(q) ||
+        item.hint.toLowerCase().includes(q),
+    );
+  }, [slashItems, slashState]);
+
+  function executeSlash(item: SlashItem) {
+    const ed = editorRef.current;
+    if (!ed || !slashState) return;
+    ed.chain().focus().deleteRange({ from: slashState.from, to: slashState.to }).run();
+    item.run(ed);
+    setSlashState(null);
+  }
+
   useEffect(() => () => clearTimeout(confirmTimer.current), []);
+
+  const stats = useMemo(() => computeDocStats(liveDoc), [liveDoc]);
+  const studyCardCount = useMemo(
+    () => extractStudyCards(liveDoc, title).length,
+    [liveDoc, title],
+  );
 
   function askDelete() {
     if (!confirming) {
@@ -222,6 +571,17 @@ export function NoteEditor({
     }
   }
 
+  function scrollToHeading(index: number) {
+    const container = scrollRef.current;
+    if (!container) return;
+    const nodes = container.querySelectorAll(".prose h1, .prose h2, .prose h3");
+    const target = nodes[index] as HTMLElement | undefined;
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      setOutlineOpen(false);
+    }
+  }
+
   const suggestions = allTags.filter((t) => !note.tags.includes(t));
 
   return (
@@ -244,6 +604,40 @@ export function NoteEditor({
           }}
         />
         <div className="note-actions">
+          <button
+            type="button"
+            className={`icon-btn ${recallMode ? "is-on" : ""}`}
+            onClick={() => {
+              setRecallMode((r) => {
+                const next = !r;
+                if (!next && scrollRef.current) {
+                  scrollRef.current
+                    .querySelectorAll("[data-revealed]")
+                    .forEach((el) => el.removeAttribute("data-revealed"));
+                }
+                return next;
+              });
+            }}
+            aria-pressed={recallMode}
+            title={
+              recallMode
+                ? "Exit Recall mode (reveal all)"
+                : "Active Recall mode: mask {{cloze}} and highlights to test yourself"
+            }
+          >
+            {recallMode ? <Eye size={16} /> : <EyeOff size={16} />}
+            <span className="hide-sm">Recall</span>
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => setStudyOpen(true)}
+            title="Practice Flashcards extracted from this note"
+          >
+            <Brain size={16} />
+            <span className="hide-sm">Quiz</span>
+            {studyCardCount > 0 && <span className="mini-badge">{studyCardCount}</span>}
+          </button>
           <button
             className={`icon-btn ${note.pinned ? "is-on" : ""}`}
             onClick={() => onPin(note)}
@@ -300,7 +694,9 @@ export function NoteEditor({
       <Toolbar
         editor={editor}
         getTimestampContext={getTimestampContext}
+        getPdfContext={getPdfContext}
         onPickImage={() => imageInputRef.current?.click()}
+        onNotify={onNotify}
       />
       <input
         ref={imageInputRef}
@@ -318,21 +714,150 @@ export function NoteEditor({
         }}
       />
 
-      <div className="editor-scroll" onClick={() => editor?.commands.focus()}>
+      <div
+        ref={scrollRef}
+        className="editor-scroll"
+        data-recall={recallMode ? "true" : "false"}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) editor?.commands.focus();
+        }}
+        onKeyDownCapture={(e) => {
+          if (!slashState?.open || filteredSlash.length === 0) return;
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setSlashState((s) =>
+              s ? { ...s, selIndex: (s.selIndex + 1) % filteredSlash.length } : null,
+            );
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setSlashState((s) =>
+              s
+                ? {
+                    ...s,
+                    selIndex: (s.selIndex - 1 + filteredSlash.length) % filteredSlash.length,
+                  }
+                : null,
+            );
+          } else if (e.key === "Enter" || e.key === "Tab") {
+            e.preventDefault();
+            const pick = filteredSlash[slashState.selIndex] ?? filteredSlash[0];
+            if (pick) executeSlash(pick);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            setSlashState(null);
+          }
+        }}
+      >
         <EditorContent editor={editor} />
+
+        {slashState?.open && filteredSlash.length > 0 && (
+          <div className="slash-menu" role="listbox" aria-label="Quick insert commands">
+            <div className="slash-menu-head">
+              <Sparkles size={12} />
+              <span>Insert block or study anchor</span>
+            </div>
+            {filteredSlash.map((item, idx) => (
+              <button
+                key={item.key}
+                type="button"
+                role="option"
+                aria-selected={idx === slashState.selIndex}
+                data-sel={idx === slashState.selIndex}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  executeSlash(item);
+                }}
+                onMouseEnter={() =>
+                  setSlashState((s) => (s ? { ...s, selIndex: idx } : null))
+                }
+              >
+                <span className="slash-icon">{item.icon}</span>
+                <span className="slash-label">{item.label}</span>
+                <kbd>{item.hint}</kbd>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
+
+      <footer className="editor-foot">
+        <div className="editor-stats">
+          <span>{stats.words} {stats.words === 1 ? "word" : "words"}</span>
+          <span>·</span>
+          <span>~{stats.readMin} min read</span>
+          {stats.tasksTotal > 0 && (
+            <>
+              <span>·</span>
+              <span className="stat-accent">
+                {stats.tasksDone}/{stats.tasksTotal} checkpoints
+              </span>
+            </>
+          )}
+          {stats.timestamps > 0 && (
+            <>
+              <span>·</span>
+              <span>{stats.timestamps} ⏱</span>
+            </>
+          )}
+          {stats.pdfRefs > 0 && (
+            <>
+              <span>·</span>
+              <span>{stats.pdfRefs} 📄</span>
+            </>
+          )}
+        </div>
+
+        {stats.headings.length > 0 && (
+          <div className="outline-wrap">
+            <button
+              type="button"
+              className={`outline-btn ${outlineOpen ? "is-on" : ""}`}
+              onClick={() => setOutlineOpen((o) => !o)}
+              aria-expanded={outlineOpen}
+            >
+              <ListTree size={13} />
+              <span>Outline ({stats.headings.length})</span>
+            </button>
+            {outlineOpen && (
+              <div className="outline-pop" role="menu" aria-label="Document outline">
+                <div className="outline-head">Jump to section</div>
+                <ul>
+                  {stats.headings.map((h) => (
+                    <li key={h.index} data-level={h.level}>
+                      <button type="button" onClick={() => scrollToHeading(h.index)}>
+                        {h.text}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+      </footer>
+
+      {studyOpen && (
+        <StudyModal
+          note={{ ...note, title, content: liveDoc }}
+          onClose={() => setStudyOpen(false)}
+        />
+      )}
     </div>
   );
-}
+});
 
 function Toolbar({
   editor,
   getTimestampContext,
+  getPdfContext,
   onPickImage,
+  onNotify,
 }: {
   editor: Editor | null;
   getTimestampContext?: () => { youtubeId: string; seconds: number } | null;
+  getPdfContext?: () => { pdfId: string; title: string; page: number } | null;
   onPickImage: () => void;
+  onNotify?: (msg: string) => void;
 }) {
   if (!editor) return <div className="toolbar" />;
   const size = (editor.getAttributes("textStyle").fontSize as string | null) ?? "";
@@ -367,6 +892,13 @@ function Toolbar({
         <Highlighter size={16} />,
         "Ctrl+Shift+H",
       )}
+      {btn(
+        "Cloze recall",
+        editor.isActive("cloze"),
+        () => editor.chain().focus().toggleCloze().run(),
+        <Brain size={16} />,
+        "Ctrl+Shift+K or {{text}}",
+      )}
       {btn("Heading", editor.isActive("heading", { level: 2 }), () => editor.chain().focus().toggleHeading({ level: 2 }).run(), <Heading2 size={16} />)}
       <span className="tb-sep" />
       <select
@@ -398,11 +930,37 @@ function Toolbar({
         false,
         () => {
           const ctx = getTimestampContext?.();
-          if (!ctx) return;
+          if (!ctx) {
+            onNotify?.("Play or select a YouTube video first to insert a timestamp.");
+            return;
+          }
           editor.chain().focus().insertTimestampChip(ctx).run();
         },
         <Timer size={16} />,
         "Current video time",
+      )}
+      {btn(
+        "Cite PDF page",
+        false,
+        () => {
+          const ctx = getPdfContext?.();
+          if (!ctx) {
+            onNotify?.("Open a PDF in the right panel first to cite a page.");
+            return;
+          }
+          const short = ctx.title.length > 20 ? `${ctx.title.slice(0, 19)}…` : ctx.title;
+          editor
+            .chain()
+            .focus()
+            .insertPdfAnchor({
+              pdfId: ctx.pdfId,
+              page: ctx.page,
+              label: `${short} p.${ctx.page}`,
+            })
+            .run();
+        },
+        <FileText size={16} />,
+        "Cite active PDF page",
       )}
       <span className="tb-sep" />
       {btn("Undo", false, () => editor.chain().focus().undo().run(), <Undo2 size={16} />, "Ctrl+Z")}

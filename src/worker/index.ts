@@ -4,6 +4,7 @@ import { auth, originCheck, requireAuth } from "./routes/auth";
 import { attachments } from "./routes/attachments";
 import { misc } from "./routes/misc";
 import { notes } from "./routes/notes";
+import { pdfs } from "./routes/pdfs";
 import { videos } from "./routes/videos";
 
 const app = new Hono<AppEnv>();
@@ -13,7 +14,9 @@ const api = new Hono<AppEnv>();
 
 api.use("*", async (c, next) => {
   await next();
-  c.res.headers.set("Cache-Control", "no-store");
+  if (!c.res.headers.has("Cache-Control")) {
+    c.res.headers.set("Cache-Control", "no-store");
+  }
   c.res.headers.set("X-Content-Type-Options", "nosniff");
 });
 api.use("*", originCheck);
@@ -21,7 +24,7 @@ api.use("*", requireAuth);
 
 api.get("/health", async (c) => {
   try {
-    await c.env.DB.prepare("SELECT 1 FROM login_attempts LIMIT 1").all();
+    await c.env.DB.prepare("SELECT 1 FROM note_pdf_chunks LIMIT 1").all();
     return c.json({ ok: true });
   } catch {
     return c.json({ ok: false, error: "schema not ready" }, 503);
@@ -31,6 +34,7 @@ api.get("/health", async (c) => {
 api.route("/", auth);
 api.route("/", notes);
 api.route("/", videos);
+api.route("/", pdfs);
 api.route("/", attachments);
 api.route("/", misc);
 

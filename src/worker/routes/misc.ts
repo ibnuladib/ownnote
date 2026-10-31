@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { TEMPLATES } from "../../shared/templates";
-import type { Note, NoteVideo, UserPrefs } from "../../shared/types";
+import type { Note, NotePdf, NoteVideo, UserPrefs } from "../../shared/types";
 import { HttpError, type AppEnv } from "../env";
 import { readJson } from "../lib/http";
 import { NOTE_ORDER, loadTags, toNote, toSummary, type NoteRow } from "../lib/notes-db";
@@ -15,6 +15,7 @@ import {
   searchAndroid,
   startSabrStreams,
 } from "../lib/ytAndroid";
+import { loadPdfs } from "./pdfs";
 import { loadVideos } from "./videos";
 
 export const misc = new Hono<AppEnv>();
@@ -319,9 +320,11 @@ misc.get("/export", async (c) => {
     .all<NoteRow>();
   const tags = await loadTags(db);
   const videos = await loadVideos(db);
-  const exported: (Note & { videos: NoteVideo[] })[] = results.map((r) => ({
+  const pdfList = await loadPdfs(db).catch(() => [] as NotePdf[]);
+  const exported: (Note & { videos: NoteVideo[]; pdfs: NotePdf[] })[] = results.map((r) => ({
     ...toNote(r, tags.get(r.id) ?? []),
     videos: videos.filter((v) => v.note_id === r.id),
+    pdfs: pdfList.filter((p) => p.note_id === r.id),
   }));
   const date = new Date().toISOString().slice(0, 10);
 
@@ -348,6 +351,13 @@ misc.get("/export", async (c) => {
         const mark = { unwatched: " ", in_progress: "~", done: "x" } as const;
         parts.push(
           "## Videos\n\n" + n.videos.map((v) => `- [${mark[v.status]}] [${v.title}](${v.url})`).join("\n"),
+        );
+      }
+      if (n.pdfs.length) {
+        const pmark = { unread: " ", reading: "~", done: "x" } as const;
+        parts.push(
+          "## PDFs\n\n" +
+            n.pdfs.map((p) => `- [${pmark[p.status]}] ${p.title} (p.${p.current_page}/${p.page_count})`).join("\n"),
         );
       }
       return parts.join("\n\n");

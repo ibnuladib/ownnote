@@ -4,6 +4,8 @@ export type TipTapJSON = Record<string, unknown>;
 
 export type VideoStatus = "unwatched" | "in_progress" | "done";
 
+export type PdfStatus = "unread" | "reading" | "done";
+
 export type NoteSummary = {
   id: string;
   title: string;
@@ -31,6 +33,17 @@ export type NoteVideo = {
   created_at: string;
   position_seconds?: number;
   duration_seconds?: number | null;
+};
+
+export type NotePdf = {
+  id: string;
+  note_id: string;
+  title: string;
+  byte_size: number;
+  page_count: number;
+  current_page: number;
+  status: PdfStatus;
+  created_at: string;
 };
 
 export type UserPrefs = {

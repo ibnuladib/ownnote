@@ -49,6 +49,27 @@ export function toNote(r: NoteRow, tags: string[]): Note {
 /** note_id -> tag names (sorted), for all notes or a given id list */
 export async function loadTags(db: D1Database, noteIds?: string[]): Promise<Map<string, string[]>> {
   const map = new Map<string, string[]>();
+  if (noteIds && noteIds.length === 0) return map;
+
+  if (noteIds && noteIds.length <= 80) {
+    const placeholders = noteIds.map(() => "?").join(", ");
+    const { results } = await db
+      .prepare(
+        `SELECT nt.note_id AS note_id, t.name AS name FROM note_tags nt
+         JOIN tags t ON t.id = nt.tag_id
+         WHERE nt.note_id IN (${placeholders})
+         ORDER BY t.name COLLATE NOCASE`,
+      )
+      .bind(...noteIds)
+      .all<{ note_id: string; name: string }>();
+    for (const r of results) {
+      const arr = map.get(r.note_id);
+      if (arr) arr.push(r.name);
+      else map.set(r.note_id, [r.name]);
+    }
+    return map;
+  }
+
   const { results } = await db
     .prepare(
       `SELECT nt.note_id AS note_id, t.name AS name FROM note_tags nt

@@ -5,6 +5,10 @@ import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import { marked } from "marked";
 import type { TipTapJSON } from "@shared/types";
+import { ClozeMark } from "../extensions/clozeMark";
+import { PdfAnchor } from "../extensions/pdfAnchor";
+import { ResizableImage } from "../extensions/resizableImage";
+import { TimestampChip } from "../extensions/timestampChip";
 import { EMPTY_DOC } from "./emptyDoc";
 
 export type ImportDraft = {
@@ -19,6 +23,10 @@ const MAX_FILE_BYTES = 1_500_000;
 const IMPORT_EXTENSIONS = [
   StarterKit,
   Highlight,
+  ClozeMark,
+  ResizableImage,
+  TimestampChip,
+  PdfAnchor,
   TaskList,
   TaskItem.configure({ nested: true }),
 ];
@@ -45,9 +53,11 @@ function enhanceTaskLists(html: string): string {
   return doc.body.innerHTML;
 }
 
-/** Support `==highlighted==` which marked doesn't know about. */
+/** Support `==highlighted==` and `{{cloze}}` which marked doesn't know about. */
 function prepMarkdown(md: string): string {
-  return md.replace(/==([^=\n]+)==/g, "<mark>$1</mark>");
+  return md
+    .replace(/==([^=\n]+)==/g, "<mark>$1</mark>")
+    .replace(/\{\{([^}\n]+)\}\}/g, '<span data-cloze="">$1</span>');
 }
 
 export function markdownToDoc(md: string): TipTapJSON {

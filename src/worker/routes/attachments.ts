@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { HttpError, type AppEnv } from "../env";
+import { toUint8Array } from "../lib/bytes";
 import { nowIso } from "../lib/http";
 import { getNoteRow } from "../lib/notes-db";
 
@@ -70,19 +71,53 @@ attachments.post("/notes/:id/attachments", async (c) => {
 
 attachments.get("/attachments/:id", async (c) => {
   const id = c.req.param("id");
+  const etag = `"att-${id}"`;
+
+  if (c.req.header("if-none-match") === etag) {
+    const exists = await c.env.DB.prepare(`SELECT 1 AS x FROM note_attachments WHERE id = ?`)
+      .bind(id)
+      .first();
+    if (exists) {
+      return new Response(null, {
+        status: 304,
+        headers: {
+          ETag: etag,
+          "Cache-Control": "private, max-age=86400, immutable",
+        },
+      });
+    }
+  }
+
   const row = await c.env.DB.prepare(
     `SELECT id, note_id, r2_key, content_type, byte_size, created_at, data FROM note_attachments WHERE id = ?`,
   )
     .bind(id)
     .first<AttachmentRow>();
   if (!row) throw new HttpError(404, "Attachment not found");
-  if (!row.data || row.data.byteLength === 0) throw new HttpError(404, "Attachment file missing");
+  let bytes = toUint8Array(row.data);
+  if (bytes.byteLength === 0) {
+    const { results } = await c.env.DB.prepare(
+      `SELECT data FROM note_attachment_chunks WHERE attachment_id = ? ORDER BY chunk_index ASC`,
+    )
+      .bind(id)
+      .all<{ data: unknown }>();
+    const parts = results.map((r) => toUint8Array(r.data)).filter((p) => p.byteLength > 0);
+    const total = parts.reduce((n, p) => n + p.byteLength, 0);
+    if (!total) throw new HttpError(404, "Attachment file missing");
+    bytes = new Uint8Array(total);
+    let pos = 0;
+    for (const part of parts) {
+      bytes.set(part, pos);
+      pos += part.byteLength;
+    }
+  }
 
   const headers = new Headers();
   headers.set("Content-Type", row.content_type);
-  headers.set("Content-Length", String(row.byte_size));
-  headers.set("Cache-Control", "private, max-age=3600");
-  return new Response(row.data, { status: 200, headers });
+  headers.set("Content-Length", String(bytes.byteLength));
+  headers.set("ETag", etag);
+  headers.set("Cache-Control", "private, max-age=86400, immutable");
+  return new Response(bytes, { status: 200, headers });
 });
 
 attachments.delete("/attachments/:id", async (c) => {

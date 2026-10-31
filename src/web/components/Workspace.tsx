@@ -11,6 +11,7 @@ import {
   BookOpen,
   ChevronDown,
   Download,
+  FileText,
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
@@ -39,14 +40,17 @@ import {
 } from "../lib/panelLayout";
 import { Saver, type SaveState } from "../lib/saver";
 import { draftsFromFile } from "../lib/importMarkdown";
+import { toggleTheme } from "../lib/theme";
 import { NoteList } from "./NoteList";
-import { NoteEditor } from "./NoteEditor";
+import { NoteEditor, type NoteEditorHandle } from "./NoteEditor";
 import { VideoPanel, type VideoPanelHandle } from "./VideoPanel";
-import { SearchPalette } from "./SearchPalette";
+import { PdfPanel, type PdfPanelHandle } from "./PdfPanel";
+import { SearchPalette, type PaletteCommand } from "./SearchPalette";
 import { ThemeToggle } from "./ThemeToggle";
 import { Pomodoro } from "./Pomodoro";
 
 type Pane = "notes" | "write" | "watch";
+type StudyMode = "video" | "pdf";
 
 function sortNotes(list: NoteSummary[]): NoteSummary[] {
   return [...list].sort((a, b) => {
@@ -85,12 +89,18 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
   const [listLoading, setListLoading] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [pane, setPane] = useState<Pane>("write");
+  const [studyMode, setStudyMode] = useState<StudyMode>("video");
   const [searchOpen, setSearchOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [importing, setImporting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const videoPanelRef = useRef<VideoPanelHandle | null>(null);
+  const pdfPanelRef = useRef<PdfPanelHandle | null>(null);
+  const noteEditorRef = useRef<NoteEditorHandle | null>(null);
+
+  // In-memory LRU-style note cache for 0ms optimistic note switching
+  const noteCacheRef = useRef<Map<string, Note>>(new Map());
 
   const layout0 = useMemo(() => loadPanelLayout(), []);
   const [notesW, setNotesW] = useState(layout0.notesW);
@@ -115,11 +125,13 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
     () =>
       new Saver(800, {
         onStatus: setSaveState,
-        onSaved: (n) =>
+        onSaved: (n) => {
+          noteCacheRef.current.set(n.id, n);
           setNotes((list) =>
             // Keep local title/tags (the user may have typed more since this PATCH left).
             sortNotes(list.map((x) => (x.id === n.id ? { ...x, updated_at: n.updated_at } : x))),
-          ),
+          );
+        },
       }),
     [],
   );
@@ -135,16 +147,24 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
     async (id: string) => {
       selectedRef.current = id;
       setSelectedId(id);
-      setNote(null);
+      const cached = noteCacheRef.current.get(id);
+      if (cached) {
+        setNote(cached);
+      } else {
+        setNote(null);
+      }
       try {
         const n = await api.getNote(id);
+        noteCacheRef.current.set(n.id, n);
         if (selectedRef.current !== id) return;
         setNote(n);
       } catch {
         if (selectedRef.current !== id) return;
-        notify("That note couldn't be opened.");
-        setSelectedId(null);
-        selectedRef.current = null;
+        if (!cached) {
+          notify("That note couldn't be opened.");
+          setSelectedId(null);
+          selectedRef.current = null;
+        }
       }
     },
     [notify],
@@ -235,6 +255,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
     try {
       void saver.flush();
       const n = await api.createNote("Untitled");
+      noteCacheRef.current.set(n.id, n);
       setNotes((l) => sortNotes([toSummary(n), ...l.filter((x) => x.id !== n.id)]));
       selectedRef.current = n.id;
       setSelectedId(n.id);
@@ -251,6 +272,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
       try {
         void saver.flush();
         const n = await api.createFromTemplate(key, name === "Learning journey" ? "New learning journey" : name);
+        noteCacheRef.current.set(n.id, n);
         setNotes((l) => sortNotes([toSummary(n), ...l.filter((x) => x.id !== n.id)]));
         selectedRef.current = n.id;
         setSelectedId(n.id);
@@ -288,6 +310,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
                   /* note exists; tags optional */
                 }
               }
+              noteCacheRef.current.set(note.id, note);
               setNotes((l) => sortNotes([toSummary(note), ...l.filter((x) => x.id !== note.id)]));
               last = note;
               created++;
@@ -316,6 +339,8 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
 
   const onTitle = useCallback(
     (id: string, title: string) => {
+      const cached = noteCacheRef.current.get(id);
+      if (cached) noteCacheRef.current.set(id, { ...cached, title });
       setNotes((l) => l.map((n) => (n.id === id ? { ...n, title } : n)));
       saver.queue(id, { title });
     },
@@ -323,7 +348,11 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
   );
 
   const onContent = useCallback(
-    (id: string, content: TipTapJSON) => saver.queue(id, { content }),
+    (id: string, content: TipTapJSON) => {
+      const cached = noteCacheRef.current.get(id);
+      if (cached) noteCacheRef.current.set(id, { ...cached, content });
+      saver.queue(id, { content });
+    },
     [saver],
   );
 
@@ -332,6 +361,8 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
       const pinned = !n.pinned;
       const stamp = pinned ? new Date().toISOString() : null;
       const apply = (p: boolean, at: string | null) => {
+        const cached = noteCacheRef.current.get(n.id);
+        if (cached) noteCacheRef.current.set(n.id, { ...cached, pinned: p, pinned_at: at });
         setNotes((l) => sortNotes(l.map((x) => (x.id === n.id ? { ...x, pinned: p, pinned_at: at } : x))));
         setNote((cur) => (cur && cur.id === n.id ? { ...cur, pinned: p, pinned_at: at } : cur));
       };
@@ -350,6 +381,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
   const onDelete = useCallback(
     async (n: Note) => {
       saver.drop(n.id);
+      noteCacheRef.current.delete(n.id);
       try {
         await api.deleteNote(n.id);
       } catch {
@@ -378,6 +410,8 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
     async (n: Note, next: string[]) => {
       const prev = n.tags;
       const apply = (t: string[]) => {
+        const cached = noteCacheRef.current.get(n.id);
+        if (cached) noteCacheRef.current.set(n.id, { ...cached, tags: t });
         setNote((cur) => (cur && cur.id === n.id ? { ...cur, tags: t } : cur));
         setNotes((l) => l.map((x) => (x.id === n.id ? { ...x, tags: t } : x)));
       };
@@ -437,8 +471,6 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
       const handles = 10;
       if (d.side === "notes") {
         const raw = d.startW + (e.clientX - d.startX);
-        // Dragging past the snap threshold collapses the pane instead of
-        // crushing copy into a one-letter-wide vertical strip.
         if (raw < NOTES_SNAP_CLOSE) {
           dragRef.current = null;
           document.body.classList.remove("is-resizing");
@@ -515,14 +547,12 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
     },
     both,
   );
-  // backslash is an escape char in hotkeys parsers — use the named key + a capture fallback
   useHotkeys("mod+backslash", () => toggleNotes(), both);
   useHotkeys("mod+shift+backslash", () => toggleWatch(), both);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
-      // Prefer code — key can be "\\" or "|" depending on layout / Shift
       if (e.code !== "Backslash" && e.key !== "\\") return;
       e.preventDefault();
       if (e.shiftKey) toggleWatch();
@@ -531,6 +561,88 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [toggleNotes, toggleWatch]);
+
+  const paletteCommands = useMemo<PaletteCommand[]>(
+    () => [
+      {
+        id: "new-blank",
+        label: "New blank note",
+        hint: "Alt+N",
+        run: () => void createBlank(),
+      },
+      ...templates.map((t) => ({
+        id: `tpl-${t.key}`,
+        label: `New from template: ${t.name}`,
+        hint: "Template",
+        run: () => void createFromTemplate(t.key, t.name),
+      })),
+      {
+        id: "study-quiz",
+        label: "Start Active Recall Flashcard Quiz",
+        hint: "Quiz",
+        run: () => noteEditorRef.current?.openStudyModal(),
+      },
+      {
+        id: "toggle-recall",
+        label: "Toggle inline Recall masking",
+        hint: "Recall",
+        run: () => noteEditorRef.current?.toggleRecallMode(),
+      },
+      {
+        id: "mode-video",
+        label: "Study panel: Switch to YouTube videos",
+        hint: "Watch",
+        run: () => {
+          setStudyMode("video");
+          setWatchOpen(true);
+        },
+      },
+      {
+        id: "mode-pdf",
+        label: "Study panel: Switch to PDF papers & slides",
+        hint: "PDF",
+        run: () => {
+          setStudyMode("pdf");
+          setWatchOpen(true);
+        },
+      },
+      {
+        id: "toggle-notes",
+        label: "Toggle Notebook sidebar",
+        hint: "Ctrl+\\",
+        run: () => toggleNotes(),
+      },
+      {
+        id: "toggle-watch",
+        label: "Toggle Study right panel",
+        hint: "Ctrl+Shift+\\",
+        run: () => toggleWatch(),
+      },
+      {
+        id: "toggle-theme",
+        label: "Switch light / dark theme",
+        hint: "Theme",
+        run: () => toggleTheme(),
+      },
+      {
+        id: "export-md",
+        label: "Export all notes as Markdown",
+        hint: ".md",
+        run: () => {
+          window.location.href = exportUrl("markdown");
+        },
+      },
+      {
+        id: "export-json",
+        label: "Export all notes as JSON",
+        hint: ".json",
+        run: () => {
+          window.location.href = exportUrl("json");
+        },
+      },
+    ],
+    [createBlank, createFromTemplate, templates, toggleNotes, toggleWatch],
+  );
 
   const tagNames = tags;
   const recent = useMemo(() => notes, [notes]);
@@ -678,6 +790,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
           {note ? (
             <div className="editor-anim" key={note.id}>
               <NoteEditor
+                ref={noteEditorRef}
                 note={note}
                 allTags={tagNames}
                 onTitle={onTitle}
@@ -694,7 +807,15 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
                   };
                 }}
                 onSeekTimestamp={(youtubeId, seconds) => {
+                  setStudyMode("video");
                   videoPanelRef.current?.jumpTo(youtubeId, seconds);
+                  setWatchOpen(true);
+                  if (window.matchMedia("(max-width: 820px)").matches) setPane("watch");
+                }}
+                getPdfContext={() => pdfPanelRef.current?.getActivePdfContext() ?? null}
+                onSeekPdf={(pdfId, page) => {
+                  setStudyMode("pdf");
+                  pdfPanelRef.current?.jumpToPdf(pdfId, page);
                   setWatchOpen(true);
                   if (window.matchMedia("(max-width: 820px)").matches) setPane("watch");
                 }}
@@ -734,12 +855,48 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
         />
 
         <section className="pane pane-watch" aria-label="YouTube">
-          <VideoPanel
-            ref={videoPanelRef}
-            noteId={note?.id ?? null}
-            preferredVideoId={preferredVideo}
-            onVideoSelected={onVideoSelected}
-          />
+          <div className="study-mode-tabs" role="tablist" aria-label="Study source mode">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={studyMode === "video"}
+              data-on={studyMode === "video"}
+              onClick={() => setStudyMode("video")}
+            >
+              <Tv size={14} />
+              <span>Videos</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={studyMode === "pdf"}
+              data-on={studyMode === "pdf"}
+              onClick={() => setStudyMode("pdf")}
+            >
+              <FileText size={14} />
+              <span>PDFs</span>
+            </button>
+          </div>
+
+          <div className="study-pane-body" data-active={studyMode === "video"}>
+            <VideoPanel
+              ref={videoPanelRef}
+              noteId={note?.id ?? null}
+              preferredVideoId={preferredVideo}
+              onVideoSelected={onVideoSelected}
+            />
+          </div>
+
+          <div className="study-pane-body" data-active={studyMode === "pdf"}>
+            <PdfPanel
+              ref={pdfPanelRef}
+              noteId={note?.id ?? null}
+              onInsertCitation={(attrs) => {
+                noteEditorRef.current?.insertPdfCitation(attrs);
+              }}
+              onNotify={notify}
+            />
+          </div>
         </section>
       </main>
 
@@ -759,7 +916,12 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
       </nav>
 
       {searchOpen && (
-        <SearchPalette recent={recent} onPick={selectNote} onClose={() => setSearchOpen(false)} />
+        <SearchPalette
+          recent={recent}
+          commands={paletteCommands}
+          onPick={selectNote}
+          onClose={() => setSearchOpen(false)}
+        />
       )}
       {toast && (
         <div className="toast" role="status">

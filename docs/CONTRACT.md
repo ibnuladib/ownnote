@@ -76,8 +76,20 @@ Empty `q` → `400`. Innertube fetch failure → `502`. Soft parse / no hits →
 | Method | Path | Body | Response |
 |--------|------|------|----------|
 | POST | `/api/notes/:id/attachments` | multipart `file` (JPEG/PNG/GIF/WebP, ≤900KB; stored in D1) | `{ "id", "url", "content_type", "byte_size" }` |
-| GET | `/api/attachments/:id` | — | binary stream |
+| GET | `/api/attachments/:id` | — | binary stream (with `ETag` + `304` support). Larger historical images are served from `note_attachment_chunks`. |
 | DELETE | `/api/attachments/:id` | — | `204` |
+
+## PDFs (Phase A study sources)
+
+| Method | Path | Body | Response |
+|--------|------|------|----------|
+| GET | `/api/notes/:id/pdfs` | — | `{ "pdfs": NotePdf[] }` |
+| POST | `/api/notes/:id/pdfs` | multipart `file` (PDF, ≤10MB; chunked in D1), optional `title`, `page_count` | `{ "pdf": NotePdf }` |
+| GET | `/api/pdfs/:id/file` | — | `application/pdf` stream (supports `Range` & `ETag`) |
+| PATCH | `/api/pdfs/:id` | `{ "title"?, "status"?, "current_page"?, "page_count"? }` | `{ "pdf": NotePdf }` |
+| DELETE | `/api/pdfs/:id` | — | `204` |
+
+`status`: `"unread" | "reading" | "done"`
 
 ## Watch progress
 

@@ -49,6 +49,45 @@ test.describe("API integration", () => {
     const exp = await request.get("/api/export?format=json");
     expect(exp.status()).toBe(200);
 
+    // Phase A PDF upload, progress update, byte-range stream, and delete
+    const NodeBuf = (globalThis as unknown as { Buffer: { from(s: string): never } }).Buffer;
+    const pdfRes = await request.post(`/api/notes/${note.id}/pdfs`, {
+      multipart: {
+        file: {
+          name: "attention_is_all_you_need.pdf",
+          mimeType: "application/pdf",
+          buffer: NodeBuf.from(
+            "%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Count 2 /Kids [] >> endobj\n%%EOF\n",
+          ),
+        },
+      },
+    });
+    expect(pdfRes.status()).toBe(200);
+    const { pdf } = (await pdfRes.json()) as {
+      pdf: { id: string; title: string; page_count: number; current_page: number; status: string };
+    };
+    expect(pdf.title).toContain("attention");
+    expect(pdf.page_count).toBe(2);
+
+    const patchedPdf = await request.patch(`/api/pdfs/${pdf.id}`, {
+      data: { current_page: 2, status: "done" },
+    });
+    expect(patchedPdf.status()).toBe(200);
+
+    const pdfFile = await request.get(`/api/pdfs/${pdf.id}/file`);
+    expect(pdfFile.status()).toBe(200);
+    expect(pdfFile.headers()["content-type"]).toContain("application/pdf");
+    const pdfBytes = new Uint8Array(await pdfFile.body());
+    expect(new TextDecoder().decode(pdfBytes.subarray(0, 5))).toBe("%PDF-");
+
+    const ranged = await request.get(`/api/pdfs/${pdf.id}/file`, {
+      headers: { Range: "bytes=0-4" },
+    });
+    expect(ranged.status()).toBe(206);
+    expect(new TextDecoder().decode(new Uint8Array(await ranged.body()))).toBe("%PDF-");
+
+    expect((await request.delete(`/api/pdfs/${pdf.id}`)).status()).toBe(204);
+
     expect((await request.delete(`/api/notes/${note.id}`)).status()).toBe(204);
   });
 
@@ -79,8 +118,8 @@ test.describe("API integration", () => {
     });
     expect(stream.status()).toBe(206);
     expect(stream.headers()["content-type"] ?? "").toContain("video/mp4");
-    const buf = Buffer.from(await stream.body());
-    expect(buf.length).toBeGreaterThan(100);
-    expect(buf.slice(4, 8).toString()).toBe("ftyp");
+    const buf = new Uint8Array(await stream.body());
+    expect(buf.byteLength).toBeGreaterThan(100);
+    expect(new TextDecoder().decode(buf.subarray(4, 8))).toBe("ftyp");
   });
 });
