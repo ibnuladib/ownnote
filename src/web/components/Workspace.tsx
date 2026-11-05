@@ -32,6 +32,7 @@ import {
   NOTES_SNAP_CLOSE,
   WATCH_MAX,
   WATCH_MIN,
+  halfPageWatchWidth,
   loadPanelLayout,
   saveNotesOpen,
   saveNotesW,
@@ -107,6 +108,8 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
   const [watchW, setWatchW] = useState(layout0.watchW);
   const [notesOpen, setNotesOpen] = useState(layout0.notesOpen);
   const [watchOpen, setWatchOpen] = useState(layout0.watchOpen);
+  const [pdfHalf, setPdfHalf] = useState(false);
+  const watchBeforeHalf = useRef<number | null>(null);
 
   const selectedRef = useRef<string | null>(null);
   const lastVideoRef = useRef<string | null>(null);
@@ -497,6 +500,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
           Math.max(WATCH_MIN, window.innerWidth - notesSpace - handles - EDITOR_MIN),
         );
         const next = Math.min(cap, Math.max(WATCH_MIN, d.startW - (e.clientX - d.startX)));
+        setPdfHalf(false);
         setWatchW(next);
       }
     },
@@ -525,6 +529,31 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
       });
     }
   }, []);
+
+  const togglePdfHalf = useCallback(() => {
+    setWatchOpen(true);
+    saveWatchOpen(true);
+    if (window.matchMedia("(max-width: 920px)").matches) {
+      setPane("watch");
+      setPdfHalf((on) => !on);
+      return;
+    }
+    setPdfHalf((on) => {
+      if (!on) {
+        watchBeforeHalf.current = watchW;
+        const next = halfPageWatchWidth(notesOpen, notesW);
+        setWatchW(next);
+        saveWatchW(next);
+        return true;
+      }
+      const prev = watchBeforeHalf.current;
+      if (prev != null) {
+        setWatchW(prev);
+        saveWatchW(prev);
+      }
+      return false;
+    });
+  }, [notesOpen, notesW, watchW]);
 
   const onResizeDblClick = useCallback((side: "notes" | "watch") => {
     if (side === "notes") {
@@ -891,6 +920,8 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
             <PdfPanel
               ref={pdfPanelRef}
               noteId={note?.id ?? null}
+              halfPage={pdfHalf}
+              onToggleHalfPage={togglePdfHalf}
               onInsertCitation={(attrs) => {
                 noteEditorRef.current?.insertPdfCitation(attrs);
               }}

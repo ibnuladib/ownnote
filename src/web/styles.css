@@ -766,7 +766,12 @@ body.is-resizing {
   cursor: col-resize !important;
   user-select: none !important;
 }
-body.is-resizing iframe {
+body.is-resizing-row {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+body.is-resizing iframe,
+body.is-resizing-row iframe {
   pointer-events: none;
 }
 
@@ -2671,11 +2676,41 @@ body.is-resizing iframe {
   border: 0;
   background: #fff;
 }
+.pdf-resize-handle {
+  position: relative;
+  flex: none;
+  height: 12px;
+  margin: -2px 8px 0;
+  cursor: row-resize;
+  touch-action: none;
+}
+.pdf-resize-handle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 42px;
+  height: 4px;
+  border-radius: 99px;
+  background: var(--line);
+  transform: translate(-50%, -50%);
+  transition: background 0.15s, transform 0.15s;
+}
+.pdf-resize-handle:hover::after,
+.pdf-resize-handle:focus-visible::after,
+body.is-resizing-row .pdf-resize-handle::after {
+  transform: translate(-50%, -50%) scaleX(1.33);
+  background: var(--hl-bar);
+}
+.pdf-resize-handle:focus-visible {
+  outline: none;
+}
 .pdf-controls {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
 }
 .pdf-pager {
   display: inline-flex;
@@ -2723,7 +2758,8 @@ body.is-resizing iframe {
   font-weight: 600;
   transition: all 0.15s;
 }
-.btn-cite:hover {
+.btn-cite:hover,
+.btn-cite.is-on {
   background: var(--hl);
   color: var(--hl-ink);
 }

@@ -2,6 +2,7 @@ const NOTES_W = "ownnote-notes-w";
 const WATCH_W = "ownnote-watch-w";
 const NOTES_OPEN = "ownnote-notes-open";
 const WATCH_OPEN = "ownnote-watch-open";
+const PDF_H = "ownnote-pdf-h";
 
 export const NOTES_DEFAULT = 276;
 export const WATCH_DEFAULT = 392;
@@ -11,8 +12,10 @@ export const NOTES_SNAP_CLOSE = 140;
 export const NOTES_MAX = 480;
 export const WATCH_MIN = 260;
 /** Absolute ceiling; live drag also leaves room for the editor. */
-export const WATCH_MAX = 1100;
+export const WATCH_MAX = 1600;
 export const EDITOR_MIN = 280;
+export const PDF_H_MIN = 180;
+export const PDF_H_MAX = 2000;
 
 function readNum(key: string, fallback: number, min: number, max: number): number {
   try {
@@ -73,4 +76,34 @@ export function saveWatchOpen(open: boolean) {
   } catch {
     /* ignore */
   }
+}
+
+export function loadPdfH(): number | null {
+  try {
+    const raw = localStorage.getItem(PDF_H);
+    if (raw === null || raw === "") return null;
+    const v = Number(raw);
+    if (!Number.isFinite(v)) return null;
+    return Math.min(PDF_H_MAX, Math.max(PDF_H_MIN, Math.round(v)));
+  } catch {
+    return null;
+  }
+}
+
+export function savePdfH(h: number | null) {
+  try {
+    if (h === null) localStorage.removeItem(PDF_H);
+    else localStorage.setItem(PDF_H, String(Math.round(h)));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Study pane width so the PDF column covers half the window, leaving the editor readable. */
+export function halfPageWatchWidth(notesOpen: boolean, notesW: number): number {
+  const notesSpace = notesOpen ? notesW + 5 : 0;
+  const available = Math.max(0, window.innerWidth - notesSpace - 5);
+  const half = Math.round(window.innerWidth / 2);
+  const cap = Math.max(WATCH_MIN, available - EDITOR_MIN);
+  return Math.min(WATCH_MAX, cap, Math.max(WATCH_MIN, half));
 }

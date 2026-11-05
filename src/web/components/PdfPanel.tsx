@@ -7,12 +7,14 @@ import {
   useRef,
   useState,
   type DragEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
   BookOpenCheck,
   Check,
   ChevronLeft,
   ChevronRight,
+  Columns2,
   ExternalLink,
   FileText,
   FileUp,
@@ -21,6 +23,7 @@ import {
 } from "lucide-react";
 import type { NotePdf, PdfStatus } from "@shared/types";
 import { api, ApiError, pdfFileUrl } from "../api";
+import { PDF_H_MAX, PDF_H_MIN, loadPdfH, savePdfH } from "../lib/panelLayout";
 
 export type PdfPanelHandle = {
   getActivePdfContext: () => { pdfId: string; title: string; page: number } | null;
@@ -29,6 +32,8 @@ export type PdfPanelHandle = {
 
 type Props = {
   noteId: string | null;
+  halfPage?: boolean;
+  onToggleHalfPage?: () => void;
   onInsertCitation?: (attrs: {
     pdfId: string;
     page: number;
@@ -49,8 +54,13 @@ function shortTitle(title: string, max = 22): string {
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
 }
 
+function clampPdfH(px: number): number {
+  const ceiling = Math.min(PDF_H_MAX, Math.round(window.innerHeight * 0.92));
+  return Math.min(ceiling, Math.max(PDF_H_MIN, Math.round(px)));
+}
+
 export const PdfPanel = forwardRef<PdfPanelHandle, Props>(function PdfPanel(
-  { noteId, onInsertCitation, onNotify },
+  { noteId, halfPage = false, onToggleHalfPage, onInsertCitation, onNotify },
   ref,
 ) {
   const [pdfs, setPdfs] = useState<NotePdf[]>([]);
@@ -62,7 +72,13 @@ export const PdfPanel = forwardRef<PdfPanelHandle, Props>(function PdfPanel(
   const [quoteDraft, setQuoteDraft] = useState("");
   const [flashPage, setFlashPage] = useState(false);
 
+  const [viewerH, setViewerH] = useState<number | null>(() => loadPdfH());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
+  const heightDrag = useRef<{ startY: number; startH: number } | null>(null);
+  const viewerHRef = useRef(viewerH);
+  viewerHRef.current = viewerH;
+  const heightBeforeHalf = useRef<number | null>(viewerH);
   const noteRef = useRef<string | null>(noteId);
   noteRef.current = noteId;
   const pdfsRef = useRef<NotePdf[]>(pdfs);
@@ -228,6 +244,64 @@ export const PdfPanel = forwardRef<PdfPanelHandle, Props>(function PdfPanel(
     }
   }
 
+  function onViewerResizeStart(e: ReactPointerEvent<HTMLDivElement>) {
+    const frame = frameRef.current;
+    if (!frame) return;
+    e.preventDefault();
+    heightDrag.current = {
+      startY: e.clientY,
+      startH: frame.getBoundingClientRect().height,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    document.body.classList.add("is-resizing-row");
+  }
+
+  function onViewerResizeMove(e: ReactPointerEvent<HTMLDivElement>) {
+    const d = heightDrag.current;
+    if (!d) return;
+    const next = clampPdfH(d.startH + (e.clientY - d.startY));
+    viewerHRef.current = next;
+    setViewerH(next);
+  }
+
+  function onViewerResizeEnd(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!heightDrag.current) return;
+    heightDrag.current = null;
+    document.body.classList.remove("is-resizing-row");
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    savePdfH(viewerHRef.current);
+  }
+
+  function resetViewerHeight() {
+    setViewerH(null);
+    savePdfH(null);
+  }
+
+  function toggleHalfPage() {
+    if (!halfPage) {
+      heightBeforeHalf.current = viewerHRef.current;
+      const frame = frameRef.current;
+      const wrap = frame?.closest(".pdf-wrap");
+      const room =
+        frame && wrap
+          ? wrap.getBoundingClientRect().bottom - frame.getBoundingClientRect().top - 168
+          : window.innerHeight / 2;
+      const next = clampPdfH(room);
+      viewerHRef.current = next;
+      setViewerH(next);
+      savePdfH(next);
+    } else {
+      const prev = heightBeforeHalf.current;
+      setViewerH(prev);
+      savePdfH(prev);
+    }
+    onToggleHalfPage?.();
+  }
+
   function citeCurrentPage() {
     if (!current) return;
     const label = `${shortTitle(current.title)} p.${current.current_page}`;
@@ -287,7 +361,11 @@ export const PdfPanel = forwardRef<PdfPanelHandle, Props>(function PdfPanel(
 
       {current ? (
         <div className={`pdf-stage ${flashPage ? "is-flashing" : ""}`}>
-          <div className="pdf-viewer-frame">
+          <div
+            ref={frameRef}
+            className="pdf-viewer-frame"
+            style={viewerH != null ? { height: viewerH } : undefined}
+          >
             <iframe
               key={`${current.id}:${current.current_page}`}
               className="pdf-iframe"
@@ -295,6 +373,20 @@ export const PdfPanel = forwardRef<PdfPanelHandle, Props>(function PdfPanel(
               title={current.title}
             />
           </div>
+          <div
+            className="pdf-resize-handle"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize PDF viewer"
+            aria-valuemin={PDF_H_MIN}
+            aria-valuenow={viewerH ?? undefined}
+            title="Drag to resize the PDF. Double-click to reset."
+            onPointerDown={onViewerResizeStart}
+            onPointerMove={onViewerResizeMove}
+            onPointerUp={onViewerResizeEnd}
+            onPointerCancel={onViewerResizeEnd}
+            onDoubleClick={resetViewerHeight}
+          />
 
           <div className="pdf-controls">
             <div className="pdf-pager">
@@ -336,6 +428,16 @@ export const PdfPanel = forwardRef<PdfPanelHandle, Props>(function PdfPanel(
             </div>
 
             <div className="pdf-actions-right">
+              <button
+                type="button"
+                className={`btn-cite ${halfPage ? "is-on" : ""}`}
+                onClick={toggleHalfPage}
+                aria-pressed={halfPage}
+                title={halfPage ? "Restore the previous PDF size" : "Make the PDF cover half the page"}
+              >
+                <Columns2 size={13} />
+                <span>{halfPage ? "Restore" : "Half page"}</span>
+              </button>
               <button
                 type="button"
                 className="btn-cite"
